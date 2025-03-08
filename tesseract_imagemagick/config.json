@@ -1,7 +1,7 @@
 {
   "name": "Tesseract & ImageMagick Add-on (Debian)",
   "version": "0.1",
-  "slug": "tesseract_imagemagick_debian",
+  "slug": "tesseract_imagemagick",
   "description": "Add-on для работы с Tesseract OCR и ImageMagick",
   "arch": ["armv7", "armhf", "aarch64", "amd64", "i386"],
   "startup": "services",
