@@ -1,8 +1,8 @@
 {
-  "name": "Tesseract & ImageMagick Add-on (Debian)",
+  "name": "Tesseract and ImageMagick Seven segments displays OCR",
   "version": "0.1",
   "slug": "tesseract_imagemagick",
-  "description": "Add-on для работы с Tesseract OCR и ImageMagick",
+  "description": "Tesseract and ImageMagick for Seven segments displays OCR",
   "arch": ["armv7", "armhf", "aarch64", "amd64", "i386"],
   "startup": "services",
   "boot": "auto",
