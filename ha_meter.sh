@@ -107,8 +107,8 @@ while true; do
   log_debug "Используем разрешение: ${DPI} dpi"
 
   log_debug "Обрезка области с кодом..."
-  # Добавляем параметр -density для корректной обработки изображения
-  convert -density "$DPI" "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
+  # Добавляем параметры -density и -units PixelsPerInch для корректной обработки изображения
+  convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
   if [ $? -ne 0 ]; then
     log_error "Ошибка обрезки области с кодом."
     sleep $SLEEP_INTERVAL
@@ -132,7 +132,7 @@ while true; do
   # Обрабатываем только коды 1.8.0 и 2.8.0
   if [ "$code" = "1.8.0" ] || [ "$code" = "2.8.0" ]; then
     log_debug "Код '$code' соответствует интересующему. Обрезка области со значением..."
-    convert -density "$DPI" "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
+    convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
     if [ $? -ne 0 ]; then
       log_error "Ошибка обрезки области со значением."
       sleep $SLEEP_INTERVAL
@@ -141,7 +141,7 @@ while true; do
 
     # Распознаём значение (разрешены цифры, точка и дефис)
     value=$(tesseract "$SCRIPT_DIR/value.jpg" stdout \
-      -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 \
+      -l ssd --tessdata-dir "$SCRIPT_DIR" --psm 7 \
       -c tessedit_char_whitelist=0123456789.-)
     if [ $? -ne 0 ]; then
       log_error "Ошибка OCR для значения."
