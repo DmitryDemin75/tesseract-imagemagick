@@ -117,7 +117,7 @@ while true; do
 
   # Распознаём код (разрешены цифры и точка)
   code=$(tesseract "$SCRIPT_DIR/code.jpg" stdout \
-    -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 \
+    -l ssd --tessdata-dir "$SCRIPT_DIR" --psm 7 \
     -c tessedit_char_whitelist=0123456789.)
   if [ $? -ne 0 ]; then
     log_error "Ошибка OCR для кода."
@@ -141,7 +141,7 @@ while true; do
 
     # Распознаём значение (разрешены цифры, точка и дефис)
     value=$(tesseract "$SCRIPT_DIR/value.jpg" stdout \
-      -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 \
+      -l ssd --tessdata-dir "$SCRIPT_DIR" --psm 7 \
       -c tessedit_char_whitelist=0123456789.-)
     if [ $? -ne 0 ]; then
       log_error "Ошибка OCR для значения."
