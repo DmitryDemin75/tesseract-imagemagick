@@ -4,7 +4,7 @@
 ###############################################################################
 # Настройки отладки и функций логирования
 ###############################################################################
-DEBUG=0  # Установите в 1 для включения отладочных сообщений
+DEBUG=1  # Установите в 1 для включения отладочных сообщений
 
 log_debug() {
   if [ "$DEBUG" -eq 1 ]; then
@@ -98,8 +98,17 @@ while true; do
     continue
   fi
 
+  # --- Определение разрешения (DPI) скачанного скриншота ---
+  RAW_DPI=$(identify -format "%x" "$SCRIPT_DIR/full.jpg")
+  DPI=$(echo "$RAW_DPI" | sed 's/[^0-9.]//g')
+  if [ -z "$DPI" ] || [ "$DPI" = "0" ]; then
+    DPI=300
+  fi
+  log_debug "Используем разрешение: ${DPI} dpi"
+
   log_debug "Обрезка области с кодом..."
-  convert "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
+  # Добавляем параметр -density для корректной обработки изображения
+  convert -density "$DPI" "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
   if [ $? -ne 0 ]; then
     log_error "Ошибка обрезки области с кодом."
     sleep $SLEEP_INTERVAL
@@ -123,7 +132,7 @@ while true; do
   # Обрабатываем только коды 1.8.0 и 2.8.0
   if [ "$code" = "1.8.0" ] || [ "$code" = "2.8.0" ]; then
     log_debug "Код '$code' соответствует интересующему. Обрезка области со значением..."
-    convert "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
+    convert -density "$DPI" "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
     if [ $? -ne 0 ]; then
       log_error "Ошибка обрезки области со значением."
       sleep $SLEEP_INTERVAL
