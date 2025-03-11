@@ -11,8 +11,7 @@ RUN apt-get update && \
 
 # Копируем скрипт запуска и файл обученной модели
 COPY ha_meter.sh /ha_meter.sh
-COPY tessdata/ssd_int.traineddata /tessdata/ssd_int.traineddata
-#COPY tessdata/ssd.traineddata /tessdata/ssd.traineddata
+COPY ssd_int.traineddata /ssd_int.traineddata
 RUN chmod +x /ha_meter.sh
 
 # Запускаем скрипт старта

@@ -40,7 +40,7 @@ MQTT_CONFIG_TOPIC_2="homeassistant/sensor/energy_meter_2_8_0/config"
 
 # Интервалы (сек)
 SLEEP_INTERVAL=2   # Основной интервал между итерациями
-EXTRA_PAUSE=100     # Дополнительная пауза после публикации кода 2.8.0
+EXTRA_PAUSE=90     # Дополнительная пауза после публикации кода 2.8.0
 
 # Координаты обрезки (фиксированные для обоих кодов)
 CODE_CROP="120x44+645+531"    # Область с кодом
@@ -117,7 +117,7 @@ while true; do
 
   # Распознаём код (разрешены цифры и точка)
   code=$(tesseract "$SCRIPT_DIR/code.jpg" stdout \
-    -l ssd_int --tessdata-dir "$SCRIPT_DIR/tessdata" --psm 7 \
+    -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 \
     -c tessedit_char_whitelist=0123456789.)
   if [ $? -ne 0 ]; then
     log_error "Ошибка OCR для кода."
@@ -141,7 +141,7 @@ while true; do
 
     # Распознаём значение (разрешены цифры, точка и дефис)
     value=$(tesseract "$SCRIPT_DIR/value.jpg" stdout \
-      -l ssd_int --tessdata-dir "$SCRIPT_DIR/tessdata" --psm 7 \
+      -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 \
       -c tessedit_char_whitelist=0123456789)
     if [ $? -ne 0 ]; then
       log_error "Ошибка OCR для значения."
