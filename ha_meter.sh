@@ -191,6 +191,9 @@ while true; do
   if [ $published -eq 0 ]; then
     # Если публикация не производилась, ждём стандартное время
     sleep $SLEEP_INTERVAL
+  elif [ $published -eq 1 ]; then
+    # Если публикация не производилась, ждём стандартное время
+    sleep $SLEEP_INTERVAL
   elif [ $published -eq 2 ]; then
     # Если опубликован код 2.8.0, делаем дополнительную паузу
     sleep $EXTRA_PAUSE
