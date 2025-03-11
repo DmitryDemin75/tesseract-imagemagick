@@ -40,7 +40,7 @@ MQTT_CONFIG_TOPIC_2="homeassistant/sensor/energy_meter_2_8_0/config"
 
 # Интервалы (сек)
 SLEEP_INTERVAL=1   # Основной интервал между итерациями
-EXTRA_PAUSE=105     # Дополнительная пауза после публикации кода 2.8.0
+EXTRA_PAUSE=108     # Дополнительная пауза после публикации кода 2.8.0
 
 # Координаты обрезки (фиксированные для обоих кодов)
 #CODE_CROP="120x44+645+531"    # Область с кодом
@@ -90,13 +90,13 @@ while true; do
   curl -s -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL"
   if [ $? -ne 0 ]; then
     log_error "Ошибка скачивания скриншота с камеры."
-    sleep $SLEEP_INTERVAL
+    #sleep $SLEEP_INTERVAL
     continue
   fi
 
   if [ ! -f "$SCRIPT_DIR/full.jpg" ]; then
     log_error "Файл скриншота не найден."
-    sleep $SLEEP_INTERVAL
+    #sleep $SLEEP_INTERVAL
     continue
   fi
 
@@ -113,7 +113,7 @@ while true; do
   convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
   if [ $? -ne 0 ]; then
     log_error "Ошибка обрезки области с кодом."
-    sleep $SLEEP_INTERVAL
+    #sleep $SLEEP_INTERVAL
     continue
   fi
 
@@ -123,7 +123,7 @@ while true; do
     -c tessedit_char_whitelist=0123456789.)
   if [ $? -ne 0 ]; then
     log_error "Ошибка OCR для кода."
-    sleep $SLEEP_INTERVAL
+    #sleep $SLEEP_INTERVAL
     continue
   fi
   code=$(echo "$code" | xargs)
@@ -137,7 +137,7 @@ while true; do
     convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
     if [ $? -ne 0 ]; then
       log_error "Ошибка обрезки области со значением."
-      sleep $SLEEP_INTERVAL
+      #sleep $SLEEP_INTERVAL
       continue
     fi
 
@@ -147,7 +147,7 @@ while true; do
       -c tessedit_char_whitelist=0123456789)
     if [ $? -ne 0 ]; then
       log_error "Ошибка OCR для значения."
-      sleep $SLEEP_INTERVAL
+      #sleep $SLEEP_INTERVAL
       continue
     fi
     value=$(echo "$value" | xargs)  # Убираем пробелы вокруг
