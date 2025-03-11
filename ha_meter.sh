@@ -4,7 +4,7 @@
 ###############################################################################
 # Настройки отладки и функций логирования
 ###############################################################################
-DEBUG=1  # Установите в 1 для включения отладочных сообщений
+DEBUG=0  # Установите в 1 для включения отладочных сообщений
 
 log_debug() {
   if [ "$DEBUG" -eq 1 ]; then
@@ -90,13 +90,13 @@ while true; do
   curl -s -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL"
   if [ $? -ne 0 ]; then
     log_error "Ошибка скачивания скриншота с камеры."
-    #sleep $SLEEP_INTERVAL
+    sleep $SLEEP_INTERVAL
     continue
   fi
 
   if [ ! -f "$SCRIPT_DIR/full.jpg" ]; then
     log_error "Файл скриншота не найден."
-    #sleep $SLEEP_INTERVAL
+    sleep $SLEEP_INTERVAL
     continue
   fi
 
@@ -113,7 +113,6 @@ while true; do
   convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
   if [ $? -ne 0 ]; then
     log_error "Ошибка обрезки области с кодом."
-    #sleep $SLEEP_INTERVAL
     continue
   fi
 
@@ -123,7 +122,6 @@ while true; do
     -c tessedit_char_whitelist=0123456789.)
   if [ $? -ne 0 ]; then
     log_error "Ошибка OCR для кода."
-    #sleep $SLEEP_INTERVAL
     continue
   fi
   code=$(echo "$code" | xargs)
@@ -137,7 +135,6 @@ while true; do
     convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
     if [ $? -ne 0 ]; then
       log_error "Ошибка обрезки области со значением."
-      #sleep $SLEEP_INTERVAL
       continue
     fi
 
@@ -147,7 +144,6 @@ while true; do
       -c tessedit_char_whitelist=0123456789)
     if [ $? -ne 0 ]; then
       log_error "Ошибка OCR для значения."
-      #sleep $SLEEP_INTERVAL
       continue
     fi
     value=$(echo "$value" | xargs)  # Убираем пробелы вокруг
@@ -189,9 +185,6 @@ while true; do
 
   # Логика задержек
   if [ $published -eq 0 ]; then
-    # Если публикация не производилась, ждём стандартное время
-    sleep $SLEEP_INTERVAL
-  elif [ $published -eq 1 ]; then
     # Если публикация не производилась, ждём стандартное время
     sleep $SLEEP_INTERVAL
   elif [ $published -eq 2 ]; then
