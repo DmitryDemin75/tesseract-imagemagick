@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# v0.4.4-nounset — фикс "unbound variable" + безопасные дефолты
-# - Убрано set -u (оставил -Ee o pipefail)
-# - Везде безопасные подстановки ${var:-} и явные дефолты через : ${var:=...}
-# - Логи отладки -> stderr (не попадают в переменные/JSON)
-# - Код нормализуется по хвосту (…180/…280 -> 1.8.0/2.8.0)
-# - VALUE из того же кадра, 2 препроцесса, мягкий анти-скачок
+# v0.4.5-relaxed-chop
+# Новое:
+# - VALUE_CHOP_RIGHT (и CODE_CHOP_RIGHT) — «срез» справа (по умолчанию 4 и 1 пиксель)
+# - Два варианта OCR значения: normal vs chopped-right; хак на «хвостовую 1»
+# - Выбор кандидата по близости к предыдущему, затем по отсутствию хвостовой «1»
+# - Отладка строго в stderr
 
 set -Eeo pipefail
 
@@ -39,6 +39,10 @@ VALUE_CROP="138x30+670+353"
 DX=0; DY=0
 PADY_CODE=4
 PADY_VALUE=3
+
+# НОВОЕ: «срезы» справа (в пикселях) для борьбы с ложной вертикалью = «1»
+CODE_CHOP_RIGHT=1
+VALUE_CHOP_RIGHT=4
 
 MQTT_HOST="localhost"; MQTT_USER="mqtt"; MQTT_PASSWORD="mqtt"
 MQTT_TOPIC_1="homeassistant/sensor/energy_meter/1_8_0/state"
@@ -77,7 +81,7 @@ LOG_TO_FILE=true
 LOG_FILE="/data/ha_meter.log"
 LOG_TRUNCATE_ON_START=true
 
-# Чтение /data/options.json
+# Чтение /data/options.json (все ключи опциональны)
 if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   DEBUG="$(jq -r '.debug // empty' "$OPTS_FILE")";                    : "${DEBUG:=true}"
 
@@ -89,6 +93,9 @@ if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   DY="$(jq -r '.dy // empty' "$OPTS_FILE")";                         : "${DY:=0}"
   PADY_CODE="$(jq -r '.pady_code // empty' "$OPTS_FILE")";           : "${PADY_CODE:=4}"
   PADY_VALUE="$(jq -r '.pady_value // empty' "$OPTS_FILE")";         : "${PADY_VALUE:=3}"
+
+  CODE_CHOP_RIGHT="$(jq -r '.code_chop_right // empty' "$OPTS_FILE")";   : "${CODE_CHOP_RIGHT:=1}"
+  VALUE_CHOP_RIGHT="$(jq -r '.value_chop_right // empty' "$OPTS_FILE")"; : "${VALUE_CHOP_RIGHT:=4}"
 
   MQTT_HOST="$(jq -r '.mqtt_host // empty' "$OPTS_FILE")";           : "${MQTT_HOST:=localhost}"
   MQTT_USER="$(jq -r '.mqtt_user // empty' "$OPTS_FILE")";           : "${MQTT_USER:=mqtt}"
@@ -117,7 +124,7 @@ if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // empty' "$OPTS_FILE")"; : "${CODE_BURST_DELAY_S:=0.15}"
 
   TESS_LANG="$(jq -r '.tess_lang // empty' "$OPTS_FILE")";           : "${TESS_LANG:=ssd_int}"
-  STATE_DIR="$(jq -r '.state_dir // empty' "$OPTS_FILE")";           : "${STATE_DIR:=/data/state}"
+  STATE_DIR="$(jq -r '.state_dir // empty' "$OPTS_FILE")";           : "${STATE_DIR:=$SCRIPT_DIR/state}"
 
   LOG_TO_FILE="$(jq -r '.log_to_file // empty' "$OPTS_FILE")";       : "${LOG_TO_FILE:=true}"
   LOG_FILE="$(jq -r '.log_file // empty' "$OPTS_FILE")";             : "${LOG_FILE:=/data/ha_meter.log}"
@@ -137,7 +144,7 @@ if normalize_bool "$LOG_TO_FILE"; then
 fi
 mkdir -p "$STATE_DIR"
 
-log_debug "Опции: CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=$VALUE_CROP, DX/DY=${DX}/${DY}, DEBUG=$DEBUG"
+log_debug "Опции: CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=$VALUE_CROP, DX/DY=${DX}/${DY}, DEBUG=$DEBUG, CHOP_R(code/val)=${CODE_CHOP_RIGHT}/${VALUE_CHOP_RIGHT}"
 
 ############################
 # Хелперы
@@ -205,7 +212,7 @@ normalize_code_tail(){
   echo ""
 }
 
-read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
+read_code_relaxed(){ # $1=code-crop.jpg -> echo "1.8.0|2.8.0|"
   local in="${1:-}" a b raw="" norm=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"
@@ -232,7 +239,18 @@ read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
   echo "$norm"
 }
 
-read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
+# --- вспомогательное: «срез справа» ---
+chop_right_img(){ # $1=in $2=px $3=out
+  local in="${1:-}" px="${2:-0}" out="${3:-}"
+  if [ "${px:-0}" -gt 0 ]; then
+    convert "$in" -gravity East -chop "${px}x0" "$out"
+  else
+    cp "$in" "$out"
+  fi
+}
+
+# --- читаем значение (один best из A/B препроцессов) ---
+read_value_pair_best(){ # $1=in.jpg $2=prev_int -> echo digits
   local in="${1:-}" prev="${2:-0}" a b vA="" vB="" best=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_val_A "$in" "$a"; vA="$(digits "$(ocr_txt "$a" 7 '0123456789')")"
@@ -241,12 +259,44 @@ read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
   if [ -n "$vA" ] && [ "$vA" = "$vB" ]; then echo "$vA"; return; fi
   if [ -n "$vA" ] && [ -z "$vB" ]; then echo "$vA"; return; fi
   if [ -z "$vA" ] && [ -n "$vB" ]; then echo "$vB"; return; fi
-  local dA dB iA iB
-  iA="$(intval "$vA")"; iB="$(intval "$vB")"
-  dA=$(( iA>prev ? iA-prev : prev-iA ))
-  dB=$(( iB>prev ? iB-prev : prev-iB ))
+  local iA iB dA dB; iA="$(intval "$vA")"; iB="$(intval "$vB")"
+  dA=$(( iA>prev ? iA-prev : prev-iA )); dB=$(( iB>prev ? iB-prev : prev-iB ))
   if [ "$dA" -le "$dB" ]; then best="$vA"; else best="$vB"; fi
   echo "$best"
+}
+
+# --- новый: читаем значение двумя способами (normal & chopped-right) и выбираем лучший ---
+read_value_best(){ # $1=value.jpg $2=prev_int -> echo digits
+  local in="${1:-}" prev="${2:-0}" norm_png chop_png v_norm v_chop
+  norm_png="$(mktemp --suffix=.png)"
+  chop_png="$(mktemp --suffix=.png)"
+  # базовый + срез справа
+  cp "$in" "$norm_png"
+  chop_right_img "$in" "$VALUE_CHOP_RIGHT" "$chop_png"
+
+  v_norm="$(read_value_pair_best "$norm_png" "$prev")"
+  v_chop="$(read_value_pair_best "$chop_png" "$prev")"
+
+  rm -f "$norm_png" "$chop_png"
+
+  # эвристика «хвостовая 1»
+  if [ -n "$v_norm" ] && [ -n "$v_chop" ]; then
+    if [ "${v_norm: -1}" = "1" ] && [ "${v_norm%1}" = "$v_chop" ]; then
+      echo "$v_chop"; return
+    fi
+    if [ "${v_chop: -1}" = "1" ] && [ "${v_chop%1}" = "$v_norm" ]; then
+      echo "$v_norm"; return
+    fi
+  fi
+
+  # выбор по близости к prev
+  if [ -z "$v_norm" ]; then echo "$v_chop"; return; fi
+  if [ -z "$v_chop" ]; then echo "$v_norm"; return; fi
+  local inorm ichop dnorm dchop
+  inorm="$(intval "$v_norm")"; ichop="$(intval "$v_chop")"
+  dnorm=$(( inorm>prev ? inorm-prev : prev-inorm ))
+  dchop=$(( ichop>prev ? ichop-prev : prev-ichop ))
+  if [ "$dchop" -lt "$dnorm" ]; then echo "$v_chop"; else echo "$v_norm"; fi
 }
 
 # Обрезка длины значения под конкретный код
@@ -254,7 +304,7 @@ clamp_digits_for_code(){
   local _code="${1:-1.8.0}" s="${2:-}" min max len
   if [ "$_code" = "1.8.0" ]; then min="$VAL_MIN_1_8_0"; max="$VAL_MAX_1_8_0"; else min="$VAL_MIN_2_8_0"; max="$VAL_MAX_2_8_0"; fi
   len=${#s}
-  if [ "$len" -gt "$max" ]; then s="${s: -$max}"; fi        # берём правые max цифр
+  if [ "$len" -gt "$max" ]; then s="${s:0:$max}"; fi   # важное изменение: берём ЛЕВЫЕ max цифр (отсекаем «хвост»)
   len=${#s}
   if [ "$len" -lt "$min" ]; then echo ""; return; fi
   echo "$s"
@@ -327,7 +377,14 @@ while true; do
     CODE_ROI=$(pad_roi_y "$(shift_roi "$CODE_CROP")"  "$PADY_CODE")
     VALUE_ROI=$(pad_roi_y "$(shift_roi "$VALUE_CROP")" "$PADY_VALUE")
 
-    convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
+    # КОД: кроп + опц. срез справа
+    convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.raw.jpg" || { log_error "КРОП code"; break; }
+    if [ "${CODE_CHOP_RIGHT:-0}" -gt 0 ]; then
+      convert "$SCRIPT_DIR/code.raw.jpg" -gravity East -chop "${CODE_CHOP_RIGHT}x0" "$SCRIPT_DIR/code.jpg"
+    else
+      cp "$SCRIPT_DIR/code.raw.jpg" "$SCRIPT_DIR/code.jpg"
+    fi
+
     CODE_NORM="$(read_code_relaxed "$SCRIPT_DIR/code.jpg")"
     log_debug "КОД='${CODE_NORM:-}' (try $i/$CODE_BURST_TRIES)"
     if [ -n "$CODE_NORM" ]; then break; fi
@@ -340,14 +397,21 @@ while true; do
     continue
   fi
 
-  # Значение — из того же кадра
+  # Значение — из того же кадра: кроп + опц. срез справа
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
-  convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
+  convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.raw.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
+  if [ "${VALUE_CHOP_RIGHT:-0}" -gt 0 ]; then
+    convert "$SCRIPT_DIR/value.raw.jpg" -gravity East -chop "${VALUE_CHOP_RIGHT}x0" "$SCRIPT_DIR/value.jpg"
+  else
+    cp "$SCRIPT_DIR/value.raw.jpg" "$SCRIPT_DIR/value.jpg"
+  fi
 
   st_pair="$(load_state_pair "$(echo "$CODE_NORM" | tr . _ )")"
   prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
 
-  CAND="$(read_value_simple "$SCRIPT_DIR/value.jpg" "$prev_int")"
+  # ДВА ВАРИАНТА OCR значения и выбор лучшего
+  CAND="$(read_value_best "$SCRIPT_DIR/value.jpg" "$prev_int")"
+  # Ограничение длины: теперь обрезаем СЛЕВА->ПРАВО (оставляем левую часть), чтобы срубить «хвостовую 1»
   CAND="$(clamp_digits_for_code "$CODE_NORM" "$CAND")"
   if [ -z "$CAND" ]; then
     log_debug "DROP $CODE_NORM: неподходящая длина (после clamp)"
