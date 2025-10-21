@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# v0.4.3-relaxed-fix2
-# - Исправлено: "unbound variable" при set -u (везде безопасные ${1-}, дефолты и проверки)
-# - Логи отладки -> stderr (не попадают в переменные)
-# - Код нормализуется по "хвосту" (…180/…280 -> 1.8.0/2.8.0)
+# v0.4.4-nounset — фикс "unbound variable" + безопасные дефолты
+# - Убрано set -u (оставил -Ee o pipefail)
+# - Везде безопасные подстановки ${var:-} и явные дефолты через : ${var:=...}
+# - Логи отладки -> stderr (не попадают в переменные/JSON)
+# - Код нормализуется по хвосту (…180/…280 -> 1.8.0/2.8.0)
 # - VALUE из того же кадра, 2 препроцесса, мягкий анти-скачок
-# - Double-confirm по умолчанию выключен
 
-set -Eeuo pipefail
+set -Eeo pipefail
 
 ############################
 # Логирование
@@ -67,7 +67,7 @@ CODE_BURST_DELAY_S=0.15
 TESS_LANG="ssd_int"
 STATE_DIR="$SCRIPT_DIR/state"
 
-# Ограничения длины для значения (anti-trash)
+# Ограничения длины значения (anti-trash)
 VAL_MIN_1_8_0=5
 VAL_MAX_1_8_0=7
 VAL_MIN_2_8_0=3
@@ -79,54 +79,54 @@ LOG_TRUNCATE_ON_START=true
 
 # Чтение /data/options.json
 if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
-  DEBUG="$(jq -r '.debug // true' "$OPTS_FILE")"
+  DEBUG="$(jq -r '.debug // empty' "$OPTS_FILE")";                    : "${DEBUG:=true}"
 
-  CAMERA_URL="$(jq -r '.camera_url // env.CAMERA_URL' "$OPTS_FILE")"
+  CAMERA_URL="$(jq -r '.camera_url // empty' "$OPTS_FILE")";         : "${CAMERA_URL:=http://127.0.0.1/snap.jpg}"
 
-  CODE_CROP="$(jq -r '.code_crop // env.CODE_CROP' "$OPTS_FILE")"
-  VALUE_CROP="$(jq -r '.value_crop // env.VALUE_CROP' "$OPTS_FILE")"
-  DX="$(jq -r '.dx // env.DX' "$OPTS_FILE")"
-  DY="$(jq -r '.dy // env.DY' "$OPTS_FILE")"
-  PADY_CODE="$(jq -r '.pady_code // env.PADY_CODE' "$OPTS_FILE")"
-  PADY_VALUE="$(jq -r '.pady_value // env.PADY_VALUE' "$OPTS_FILE")"
+  CODE_CROP="$(jq -r '.code_crop // empty' "$OPTS_FILE")";           : "${CODE_CROP:=64x23+576+361}"
+  VALUE_CROP="$(jq -r '.value_crop // empty' "$OPTS_FILE")";         : "${VALUE_CROP:=138x30+670+353}"
+  DX="$(jq -r '.dx // empty' "$OPTS_FILE")";                         : "${DX:=0}"
+  DY="$(jq -r '.dy // empty' "$OPTS_FILE")";                         : "${DY:=0}"
+  PADY_CODE="$(jq -r '.pady_code // empty' "$OPTS_FILE")";           : "${PADY_CODE:=4}"
+  PADY_VALUE="$(jq -r '.pady_value // empty' "$OPTS_FILE")";         : "${PADY_VALUE:=3}"
 
-  MQTT_HOST="$(jq -r '.mqtt_host // env.MQTT_HOST' "$OPTS_FILE")"
-  MQTT_USER="$(jq -r '.mqtt_user // env.MQTT_USER' "$OPTS_FILE")"
-  MQTT_PASSWORD="$(jq -r '.mqtt_password // env.MQTT_PASSWORD' "$OPTS_FILE")"
-  MQTT_TOPIC_1="$(jq -r '.mqtt_topic_1_8_0 // env.MQTT_TOPIC_1' "$OPTS_FILE")"
-  MQTT_TOPIC_2="$(jq -r '.mqtt_topic_2_8_0 // env.MQTT_TOPIC_2' "$OPTS_FILE")"
-  MQTT_CONFIG_TOPIC_1="$(jq -r '.mqtt_discovery_topic_1 // env.MQTT_CONFIG_TOPIC_1' "$OPTS_FILE")"
-  MQTT_CONFIG_TOPIC_2="$(jq -r '.mqtt_discovery_topic_2 // env.MQTT_CONFIG_TOPIC_2' "$OPTS_FILE")"
+  MQTT_HOST="$(jq -r '.mqtt_host // empty' "$OPTS_FILE")";           : "${MQTT_HOST:=localhost}"
+  MQTT_USER="$(jq -r '.mqtt_user // empty' "$OPTS_FILE")";           : "${MQTT_USER:=mqtt}"
+  MQTT_PASSWORD="$(jq -r '.mqtt_password // empty' "$OPTS_FILE")";   : "${MQTT_PASSWORD:=mqtt}"
+  MQTT_TOPIC_1="$(jq -r '.mqtt_topic_1_8_0 // empty' "$OPTS_FILE")"; : "${MQTT_TOPIC_1:=homeassistant/sensor/energy_meter/1_8_0/state}"
+  MQTT_TOPIC_2="$(jq -r '.mqtt_topic_2_8_0 // empty' "$OPTS_FILE")"; : "${MQTT_TOPIC_2:=homeassistant/sensor/energy_meter/2_8_0/state}"
+  MQTT_CONFIG_TOPIC_1="$(jq -r '.mqtt_discovery_topic_1 // empty' "$OPTS_FILE")"; : "${MQTT_CONFIG_TOPIC_1:=homeassistant/sensor/energy_meter_1_8_0/config}"
+  MQTT_CONFIG_TOPIC_2="$(jq -r '.mqtt_discovery_topic_2 // empty' "$OPTS_FILE")"; : "${MQTT_CONFIG_TOPIC_2:=homeassistant/sensor/energy_meter_2_8_0/config}"
 
-  SLEEP_INTERVAL="$(jq -r '.sleep_interval // env.SLEEP_INTERVAL' "$OPTS_FILE")"
-  EXTRA_PAUSE="$(jq -r '.extra_pause_after_2_8_0 // env.EXTRA_PAUSE' "$OPTS_FILE")"
+  SLEEP_INTERVAL="$(jq -r '.sleep_interval // empty' "$OPTS_FILE")"; : "${SLEEP_INTERVAL:=1}"
+  EXTRA_PAUSE="$(jq -r '.extra_pause_after_2_8_0 // empty' "$OPTS_FILE")"; : "${EXTRA_PAUSE:=108}"
 
-  VALUE_DECIMALS="$(jq -r '.value_decimals // env.VALUE_DECIMALS' "$OPTS_FILE")"
-  DAILY_MAX_KWH_1_8_0="$(jq -r '.daily_max_kwh_1_8_0 // env.DAILY_MAX_KWH_1_8_0' "$OPTS_FILE")"
-  DAILY_MAX_KWH_2_8_0="$(jq -r '.daily_max_kwh_2_8_0 // env.DAILY_MAX_KWH_2_8_0' "$OPTS_FILE")"
-  BURST_MULT="$(jq -r '.burst_mult // env.BURST_MULT' "$OPTS_FILE")"
-  MIN_STEP_UNITS="$(jq -r '.min_step_units // env.MIN_STEP_UNITS' "$OPTS_FILE")"
-  MAX_GAP_DAYS_CAP="$(jq -r '.max_gap_days_cap // env.MAX_GAP_DAYS_CAP' "$OPTS_FILE")"
+  VALUE_DECIMALS="$(jq -r '.value_decimals // empty' "$OPTS_FILE")"; : "${VALUE_DECIMALS:=3}"
+  DAILY_MAX_KWH_1_8_0="$(jq -r '.daily_max_kwh_1_8_0 // empty' "$OPTS_FILE")"; : "${DAILY_MAX_KWH_1_8_0:=200}"
+  DAILY_MAX_KWH_2_8_0="$(jq -r '.daily_max_kwh_2_8_0 // empty' "$OPTS_FILE")"; : "${DAILY_MAX_KWH_2_8_0:=50}"
+  BURST_MULT="$(jq -r '.burst_mult // empty' "$OPTS_FILE")";         : "${BURST_MULT:=2.0}"
+  MIN_STEP_UNITS="$(jq -r '.min_step_units // empty' "$OPTS_FILE")"; : "${MIN_STEP_UNITS:=1}"
+  MAX_GAP_DAYS_CAP="$(jq -r '.max_gap_days_cap // empty' "$OPTS_FILE")"; : "${MAX_GAP_DAYS_CAP:=3}"
 
-  DOUBLE_CONFIRM="$(jq -r '.double_confirm // env.DOUBLE_CONFIRM' "$OPTS_FILE")"
-  STABLE_HITS="$(jq -r '.stable_hits // env.STABLE_HITS' "$OPTS_FILE")"
-  STABLE_HITS_COLD="$(jq -r '.stable_hits_cold // env.STABLE_HITS_COLD' "$OPTS_FILE")"
-  PENDING_TTL_SEC="$(jq -r '.pending_ttl_sec // env.PENDING_TTL_SEC' "$OPTS_FILE")"
+  DOUBLE_CONFIRM="$(jq -r '.double_confirm // empty' "$OPTS_FILE")"; : "${DOUBLE_CONFIRM:=false}"
+  STABLE_HITS="$(jq -r '.stable_hits // empty' "$OPTS_FILE")";       : "${STABLE_HITS:=2}"
+  STABLE_HITS_COLD="$(jq -r '.stable_hits_cold // empty' "$OPTS_FILE")"; : "${STABLE_HITS_COLD:=2}"
+  PENDING_TTL_SEC="$(jq -r '.pending_ttl_sec // empty' "$OPTS_FILE")"; : "${PENDING_TTL_SEC:=30}"
 
-  CODE_BURST_TRIES="$(jq -r '.code_burst_tries // env.CODE_BURST_TRIES' "$OPTS_FILE")"
-  CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // env.CODE_BURST_DELAY_S' "$OPTS_FILE")"
+  CODE_BURST_TRIES="$(jq -r '.code_burst_tries // empty' "$OPTS_FILE")"; : "${CODE_BURST_TRIES:=3}"
+  CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // empty' "$OPTS_FILE")"; : "${CODE_BURST_DELAY_S:=0.15}"
 
-  TESS_LANG="$(jq -r '.tess_lang // env.TESS_LANG' "$OPTS_FILE")"
-  STATE_DIR="$(jq -r '.state_dir // env.STATE_DIR' "$OPTS_FILE")"
+  TESS_LANG="$(jq -r '.tess_lang // empty' "$OPTS_FILE")";           : "${TESS_LANG:=ssd_int}"
+  STATE_DIR="$(jq -r '.state_dir // empty' "$OPTS_FILE")";           : "${STATE_DIR:=/data/state}"
 
-  LOG_TO_FILE="$(jq -r '.log_to_file // env.LOG_TO_FILE' "$OPTS_FILE")"
-  LOG_FILE="$(jq -r '.log_file // env.LOG_FILE' "$OPTS_FILE")"
-  LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // env.LOG_TRUNCATE_ON_START' "$OPTS_FILE")"
+  LOG_TO_FILE="$(jq -r '.log_to_file // empty' "$OPTS_FILE")";       : "${LOG_TO_FILE:=true}"
+  LOG_FILE="$(jq -r '.log_file // empty' "$OPTS_FILE")";             : "${LOG_FILE:=/data/ha_meter.log}"
+  LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // empty' "$OPTS_FILE")"; : "${LOG_TRUNCATE_ON_START:=true}"
 
-  VAL_MIN_1_8_0="$(jq -r '.val_min_1_8_0 // env.VAL_MIN_1_8_0' "$OPTS_FILE")"
-  VAL_MAX_1_8_0="$(jq -r '.val_max_1_8_0 // env.VAL_MAX_1_8_0' "$OPTS_FILE")"
-  VAL_MIN_2_8_0="$(jq -r '.val_min_2_8_0 // env.VAL_MIN_2_8_0' "$OPTS_FILE")"
-  VAL_MAX_2_8_0="$(jq -r '.val_max_2_8_0 // env.VAL_MAX_2_8_0' "$OPTS_FILE")"
+  VAL_MIN_1_8_0="$(jq -r '.val_min_1_8_0 // empty' "$OPTS_FILE")";   : "${VAL_MIN_1_8_0:=5}"
+  VAL_MAX_1_8_0="$(jq -r '.val_max_1_8_0 // empty' "$OPTS_FILE")";   : "${VAL_MAX_1_8_0:=7}"
+  VAL_MIN_2_8_0="$(jq -r '.val_min_2_8_0 // empty' "$OPTS_FILE")";   : "${VAL_MIN_2_8_0:=3}"
+  VAL_MAX_2_8_0="$(jq -r '.val_max_2_8_0 // empty' "$OPTS_FILE")";   : "${VAL_MAX_2_8_0:=6}"
 fi
 
 # Лог-файл
@@ -142,33 +142,33 @@ log_debug "Опции: CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=
 ############################
 # Хелперы
 ############################
-parse_roi(){ local r="${1-}"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
+parse_roi(){ local r="${1:-0x0+0+0}"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
 fmt_roi(){ echo "${1}x${2}+${3}+${4}"; }
-shift_roi(){ read -r W H X Y < <(parse_roi "${1-0x0+0+0}"); fmt_roi "$W" "$H" "$((X+DX))" "$((Y+DY))"; }
-pad_roi_y(){ local roi="${1-0x0+0+0}" pad="${2-0}"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
-intval(){ echo "${1-0}" | awk '{if($0=="") print 0; else print int($0+0)}'; }
-digits(){ echo "${1-}" | tr -cd '0-9'; }
-lstrip_zeros(){ local s="${1-}"; s="$(echo -n "$s" | sed 's/^0\+//')"; [ -z "$s" ] && echo 0 || echo "$s"; }
+shift_roi(){ read -r W H X Y < <(parse_roi "${1:-0x0+0+0}"); fmt_roi "$W" "$H" "$((X+DX))" "$((Y+DY))"; }
+pad_roi_y(){ local roi="${1:-0x0+0+0}" pad="${2:-0}"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
+intval(){ echo "${1:-0}" | awk '{if($0=="") print 0; else print int($0+0)}'; }
+digits(){ echo "${1:-}" | tr -cd '0-9'; }
+lstrip_zeros(){ local s="${1:-}"; s="$(echo -n "$s" | sed 's/^0\+//')"; [ -z "$s" ] && echo 0 || echo "$s"; }
 
 TIMEOUT_BIN="$(command -v timeout || true)"
-with_timeout(){ local sec="${1-}"; shift || true; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
+with_timeout(){ local sec="${1:-}"; shift || true; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
 
 load_state_pair(){
-  local _code="${1-}" f="$STATE_DIR/last_${_code}.txt"
-  if [ -s "$f" ]; then
+  local _code="${1:-}" f="$STATE_DIR/last_${_code}.txt"
+  if [ -n "$_code" ] && [ -s "$f" ]; then
     local line; line="$(cat "$f")"
     if echo "$line" | grep -q '|'; then echo "${line%%|*} ${line##*|}"; else echo "$line $(stat -c %Y "$f" 2>/dev/null || date +%s)"; fi
   else
     echo ""
   fi
 }
-save_state_pair(){ local _code="${1-}" v="${2-}" ts="${3-}"; echo -n "${v}|${ts}" > "$STATE_DIR/last_${_code}.txt"; }
+save_state_pair(){ local _code="${1:-}" v="${2:-}" ts="${3:-}"; [ -n "$_code" ] && echo -n "${v}|${ts}" > "$STATE_DIR/last_${_code}.txt"; }
 
 ############################
 # Анти-скачок
 ############################
 allowed_jump_units(){ # $1=code $2=dt_sec
-  local _code="${1-1.8.0}" _dt="${2-1}"
+  local _code="${1:-1.8.0}" _dt="${2:-1}"
   [ "${_dt:-0}" -lt 1 ] && _dt=1
   local dt_cap=$(( MAX_GAP_DAYS_CAP * 86400 ))
   [ "${_dt:-0}" -gt "$dt_cap" ] && _dt="$dt_cap"
@@ -189,11 +189,11 @@ pp_code_B(){ convert "$1" -auto-orient -colorspace Gray -resize 320% -adaptive-t
 pp_val_A(){ convert "$1" -auto-orient -colorspace Gray -clahe 64x64+10+2 -sigmoidal-contrast 6x50% -resize 300% -adaptive-threshold 41x41+8% -type bilevel "$2" 2>/dev/null || cp "$1" "$2"; }
 pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5% -gamma 1.10 -resize 300% -threshold 52% -type bilevel "$2"; }
 
-ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "${2-7}" --oem 1 -c tessedit_char_whitelist="${3-0123456789}" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
+ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "${2:-7}" --oem 1 -c tessedit_char_whitelist="${3:-0123456789}" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
 
 # Нормализация распознанного кода
 normalize_code_tail(){
-  local raw="${1-}"
+  local raw="${1:-}"
   local d; d="$(echo "$raw" | tr -cd '0123456789')"
   case "$d" in
     *180) echo "1.8.0"; return ;;
@@ -206,7 +206,7 @@ normalize_code_tail(){
 }
 
 read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
-  local in="${1-}" a b raw="" norm=""
+  local in="${1:-}" a b raw="" norm=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"
   raw="$(ocr_txt "$a" 7 '0128.')" || true
@@ -233,7 +233,7 @@ read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
 }
 
 read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
-  local in="${1-}" prev="${2-0}" a b vA="" vB="" best=""
+  local in="${1:-}" prev="${2:-0}" a b vA="" vB="" best=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_val_A "$in" "$a"; vA="$(digits "$(ocr_txt "$a" 7 '0123456789')")"
   pp_val_B "$in" "$b"; vB="$(digits "$(ocr_txt "$b" 7 '0123456789')")"
@@ -251,7 +251,7 @@ read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
 
 # Обрезка длины значения под конкретный код
 clamp_digits_for_code(){
-  local _code="${1-1.8.0}" s="${2-}" min max len
+  local _code="${1:-1.8.0}" s="${2:-}" min max len
   if [ "$_code" = "1.8.0" ]; then min="$VAL_MIN_1_8_0"; max="$VAL_MAX_1_8_0"; else min="$VAL_MIN_2_8_0"; max="$VAL_MAX_2_8_0"; fi
   len=${#s}
   if [ "$len" -gt "$max" ]; then s="${s: -$max}"; fi        # берём правые max цифр
@@ -264,7 +264,7 @@ clamp_digits_for_code(){
 # Принятие/публикация
 ############################
 should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
-  local _code="${1-}" _new_s="${2-}"
+  local _code="${1:-}" _new_s="${2:-}"
   [ -z "$_code" ] && { echo "NO:nocode"; return; }
   [ -z "$_new_s" ] && { echo "NO:empty"; return; }
   local len=${#_new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; fi
@@ -290,7 +290,7 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
 }
 
 publish_value(){
-  local _code="${1-1.8.0}" _value="${2-0}" topic payload ts
+  local _code="${1:-1.8.0}" _value="${2:-0}" topic payload ts
   ts=$(date --iso-8601=seconds)
   payload=$(printf '{"code":"%s","value":"%s","timestamp":"%s"}' "$_code" "$_value" "$ts")
   if [ "$_code" = "1.8.0" ]; then topic="$MQTT_TOPIC_1"; else topic="$MQTT_TOPIC_2"; fi
