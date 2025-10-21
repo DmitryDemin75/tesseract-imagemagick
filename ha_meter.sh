@@ -195,7 +195,7 @@ if command -v mosquitto_sub >/dev/null 2>&1; then
 fi
 
 ###############################################################################
-# Левенштейн (больше не используем для кода; оставил на всякий случай)
+# Левенштейн (оставлен, не используется для кода)
 ###############################################################################
 lev(){
   awk -v s="$1" -v t="$2" '
@@ -263,7 +263,6 @@ code_by_templates(){
   local thr="${CODE_TPL_THR:-0.22}" margin="${CODE_TPL_MARGIN:-0.04}"
   if [ -n "$s18" ] && { awk -v x="$s18" -v t="$thr" 'BEGIN{exit !(x<t)}'; }; then
     if [ -n "$s28" ]; then
-      # нужна разница больше margin
       awk -v a="$s28" -v b="$s18" -v m="$margin" 'BEGIN{exit !((a-b)>m)}' && best="1.8.0"
     else
       best="1.8.0"
@@ -487,17 +486,14 @@ while true; do
 
     # 2) шаблоны, если строгий не сработал
     if [ -z "$CODE_NORM" ]; then
-      # пробуем оба препроцесса и сравниваем лучшую попытку
-      local pick1 pick2
       pick1="$(code_by_templates "$bin1")"
       pick2="$(code_by_templates "$bin2")"
       if [ -n "$pick1" ] && [ -n "$pick2" ] && [ "$pick1" != "$pick2" ]; then
-        # конфликт: считаем пусто (надёжность важнее)
         CODE_NORM=""
       else
         CODE_NORM="${pick1}${pick2}"
       fi
-      [ "$CODE_NORM" = "12.8.0" ] && CODE_NORM="" # на всякий случай
+      [ "$CODE_NORM" = "12.8.0" ] && CODE_NORM=""
       [ "$CODE_NORM" = "1.8.02.8.0" ] && CODE_NORM=""
     fi
 
@@ -544,8 +540,8 @@ while true; do
 
   read -r CAND VOTES TOTAL <<<"$(read_value_votes "$SCRIPT_DIR/value.jpg" "$prev_int")"
   [ -z "$CAND" ] && CAND="0"
-  local quorum="${VALUE_VOTE_QUORUM:-2}"
-  if [ "$VOTES" -lt "$quorum" ] && [ "$TOTAL" -ge 2 ]; then
+  QUORUM="${VALUE_VOTE_QUORUM:-2}"
+  if [ "$VOTES" -lt "$QUORUM" ] && [ "$TOTAL" -ge 2 ]; then
     log_debug "VOTE $CODE_NORM: кворум не набран (cand=$CAND, votes=$VOTES/$TOTAL) → HOLD"
     verdict="NO:pending"
   else
