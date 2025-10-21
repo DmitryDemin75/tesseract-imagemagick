@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ha_meter.sh — OCR 7-segment + анти-скачок + двойное подтверждение (IM6 + Tesseract)
+# ha_meter.sh — OCR 7-segment + двойное подтверждение + анти-скачок (IM6 + Tesseract)
 
 ###############################################################################
 # Отладка и логирование (устойчиво к true/false/1/0)
@@ -52,10 +52,14 @@ if command -v jq >/dev/null 2>&1 && [ -f "$OPTS_FILE" ]; then
   MAX_GAP_DAYS_CAP="$(jq -r '.max_gap_days_cap // 3' "$OPTS_FILE")"
 
   STABLE_HITS="$(jq -r '.stable_hits // 2' "$OPTS_FILE")"
+  STABLE_HITS_COLD="$(jq -r '.stable_hits_cold // 3' "$OPTS_FILE")"
   PENDING_TTL_SEC="$(jq -r '.pending_ttl_sec // 60' "$OPTS_FILE")"
 
   TESS_LANG="$(jq -r '.tess_lang // "ssd_int"' "$OPTS_FILE")"
   STATE_DIR="$(jq -r '.state_dir // "/data/state"' "$OPTS_FILE")"
+
+  CALIBRATE_DUMP="$(jq -r '.calibrate_dump // false' "$OPTS_FILE")"
+  DUMP_DIR="$(jq -r '.dump_dir // "/share/ocr-debug"' "$OPTS_FILE")"
 else
   CAMERA_URL="http://192.168.8.195/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2&usr=admin&pwd=t1010113"
 
@@ -79,48 +83,50 @@ else
   MAX_GAP_DAYS_CAP=3
 
   STABLE_HITS=2
+  STABLE_HITS_COLD=3
   PENDING_TTL_SEC=60
 
   TESS_LANG="ssd_int"
   STATE_DIR="$SCRIPT_DIR/state"
+
+  CALIBRATE_DUMP=false
+  DUMP_DIR="/share/ocr-debug"
 fi
 mkdir -p "$STATE_DIR"
+normalize_bool "$DEBUG" && DEBUG=1 || DEBUG=0
 log_debug "Опции загружены. CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=$VALUE_CROP, DX/DY=${DX}/${DY}, DEBUG=$DEBUG"
 
-# Приведём DEBUG к 1/0, чтобы далее можно было использовать числовые проверки
-if normalize_bool "$DEBUG"; then DEBUG=1; else DEBUG=0; fi
-
 ###############################################################################
-# Утилиты
+# Утилиты и таймауты
 ###############################################################################
 parse_roi(){ local r="$1"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
 fmt_roi(){ echo "${1}x${2}+${3}+${4}"; }
 shift_roi(){ read -r W H X Y < <(parse_roi "$1"); fmt_roi "$W" "$H" "$((X+DX))" "$((Y+DY))"; }
 pad_roi_y(){ local roi="$1" pad="$2"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
 intval(){ echo "$1" | awk '{if($0=="") print 0; else print int($0+0)}'; }
-
-# timeout-обёртка для команд, чтобы не зависать (mosquitto_pub/sub, curl и т.д.)
 TIMEOUT_BIN="$(command -v timeout || true)"
-with_timeout(){ # $1=сек, $2..=команда
-  local sec="$1"; shift
-  if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi
-}
+with_timeout(){ local sec="$1"; shift; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
 
 ###############################################################################
-# Состояние last_{code}.txt: "value|ts" и pending-кандидаты
+# Состояние last_{code}.txt: "value|ts" и pending: "value|ts|hits"
 ###############################################################################
-load_state_pair(){ local code="$1" file="$STATE_DIR/last_${code}.txt"; if [ -s "$file" ]; then
-  local line; line="$(cat "$file")"
-  if echo "$line" | grep -q '|'; then echo "${line%%|*} ${line##*|}"; else echo "$line $(stat -c %Y "$file" 2>/dev/null || date +%s)"; fi
-else echo ""; fi; }
+load_state_pair(){
+  local code="$1" f="$STATE_DIR/last_${code}.txt"
+  if [ -s "$f" ]; then
+    local line; line="$(cat "$f")"
+    if echo "$line" | grep -q '|'; then echo "${line%%|*} ${line##*|}"; else echo "$line $(stat -c %Y "$f" 2>/dev/null || date +%s)"; fi
+  else
+    echo ""
+  fi
+}
 save_state_pair(){ local code="$1" v="$2" ts="$3"; echo -n "${v}|${ts}" > "$STATE_DIR/last_${code}.txt"; }
 
-load_pending(){ local code="$1"; local f="$STATE_DIR/pending_${code}.txt"; [ -s "$f" ] && cat "$f" || echo ""; }
-save_pending(){ local code="$1" val="$2"; echo "$val|$(date +%s)" > "$STATE_DIR/pending_${code}.txt"; }
+load_pending(){ local code="$1" f="$STATE_DIR/pending_${code}.txt"; [ -s "$f" ] && cat "$f" || echo ""; }
+save_pending(){ local code="$1" val="$2" ts="${3:-$(date +%s)}" hits="${4:-1}"; echo "${val}|${ts}|${hits}" > "$STATE_DIR/pending_${code}.txt"; }
 clear_pending(){ local code="$1"; rm -f "$STATE_DIR/pending_${code}.txt" 2>/dev/null || true; }
 
 ###############################################################################
-# Инициализация из MQTT retained при холодном старте (если есть mosquitto_sub)
+# Инициализация из MQTT retained (если локального state нет)
 ###############################################################################
 if command -v mosquitto_sub >/dev/null 2>&1; then
   if [ ! -s "$STATE_DIR/last_1_8_0.txt" ]; then
@@ -134,7 +140,7 @@ if command -v mosquitto_sub >/dev/null 2>&1; then
 fi
 
 ###############################################################################
-# Левенштейн (awk) — для нормализации кода 1.8.0 / 2.8.0
+# Левенштейн — нормализация кода
 ###############################################################################
 lev(){
   awk -v s="$1" -v t="$2" '
@@ -157,7 +163,7 @@ lev(){
 }
 
 ###############################################################################
-# Препроцесс (ImageMagick 6, без -auto-threshold)
+# Препроцесс (ImageMagick 6)
 ###############################################################################
 pp_code_A(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -sigmoidal-contrast 6x50% -contrast-stretch 0.5%x0.5% -gamma 1.10 -blur 0x0.3 -threshold 58% -type bilevel "$2"; }
 pp_code_B(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -contrast-stretch 1%x1% -gamma 1.00 -threshold 60% -type bilevel "$2"; }
@@ -168,7 +174,7 @@ pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5
 pp_val_C(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.3%x0.3% -gamma 1.05 -resize 320% -threshold 58% -type bilevel "$2"; }
 
 ###############################################################################
-# OCR-обвязки (Tesseract)
+# OCR-обвязки
 ###############################################################################
 ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 \
   -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
@@ -223,7 +229,7 @@ read_value_best(){ # $1=img $2=prev_value_int
 }
 
 ###############################################################################
-# Анти-скачок/двойное подтверждение/публикация
+# Анти-скачок и публикация
 ###############################################################################
 allowed_jump_units(){ # $1=code $2=dt_sec
   local code="$1" dt="$2"
@@ -247,33 +253,62 @@ publish_value(){
   save_state_pair "$(echo "$code" | tr . _ )" "$value" "$(date +%s)"
 }
 
+###############################################################################
+# should_accept — учитывает cold-start и pending hits
+###############################################################################
 should_accept(){
-  # $1=code $2=new_str_digits
+  # $1=code (1.8.0|2.8.0), $2=new_str_digits
   local code="$1" new_s="$2"
   [ -z "$new_s" ] && { echo "NO:empty"; return; }
-  local len=${#new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; fi
+  local len=${#new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; }
 
-  local cname="$(echo "$code" | tr . _ )"
-  local st; st="$(load_state_pair "$cname")"
-  local last_s="" last_ts=0
-  if [ -n "$st" ]; then last_s="${st%% *}"; last_ts="${st##* }"; else save_pending "$cname" "$new_s"; echo "NO:pending"; return; fi
+  local cname; cname="$(echo "$code" | tr . _ )"
+  local line last_s="" last_ts=0 now_ts
+  line="$(load_state_pair "$cname")"
+  if [ -n "$line" ]; then last_s="${line%% *}"; last_ts="${line##* }"; fi
 
+  now_ts=$(date +%s)
+
+  # --- Cold start: нет baseline, подтверждаем N раз подряд ---
+  if [ -z "$last_s" ]; then
+    local p pv rest pts phits age
+    p="$(load_pending "$cname")"
+    if [ -n "$p" ]; then
+      pv="${p%%|*}"; rest="${p#*|}"; pts="${rest%%|*}"; phits="${rest#*|}"; [ "$phits" = "$pts" ] && phits=1
+      age=$(( now_ts - pts ))
+      if [ "$pv" = "$new_s" ] && [ "$age" -le "$PENDING_TTL_SEC" ]; then
+        phits=$(( phits + 1 ))
+        if [ "$phits" -ge "$STABLE_HITS_COLD" ]; then
+          clear_pending "$cname"; echo "YES:confirmed"; return
+        else
+          save_pending "$cname" "$new_s" "$pts" "$phits"; echo "NO:pending"; return
+        fi
+      fi
+    fi
+    save_pending "$cname" "$new_s"; echo "NO:pending"; return
+  fi
+
+  # --- Обычный режим: монотонность + анти-скачок + double-confirm ---
   local last_i=$(intval "$last_s"); local new_i=$(intval "$new_s")
 
-  # монотонность
   if [ "$last_i" -gt 0 ] && [ "$new_i" -lt "$last_i" ]; then echo "NO:monotonic"; return; fi
 
-  # динамический анти-скачок
-  local now_ts=$(date +%s); local dt=$(( now_ts - last_ts )); [ "$dt" -lt 1 ] && dt=1
+  local dt=$(( now_ts - last_ts )); [ "$dt" -lt 1 ] && dt=1
   local allowed=$(allowed_jump_units "$code" "$dt"); local diff=$(( new_i - last_i ))
   if [ "$last_i" -gt 0 ] && [ "$diff" -gt "$allowed" ]; then echo "NO:jump($diff>$allowed)"; return; fi
 
-  # двойное подтверждение
-  local pend="$(load_pending "$cname")"
-  if [ -n "$pend" ]; then
-    local pv="${pend%%|*}" pts="${pend##*|}" age=$(( now_ts - pts ))
+  local p pv rest pts phits age
+  p="$(load_pending "$cname")"
+  if [ -n "$p" ]; then
+    pv="${p%%|*}"; rest="${p#*|}"; pts="${rest%%|*}"; phits="${rest#*|}"; [ "$phits" = "$pts" ] && phits=1
+    age=$(( now_ts - pts ))
     if [ "$pv" = "$new_s" ] && [ "$age" -le "$PENDING_TTL_SEC" ]; then
-      clear_pending "$cname"; echo "YES:confirmed"; return
+      phits=$(( phits + 1 ))
+      if [ "$phits" -ge "$STABLE_HITS" ]; then
+        clear_pending "$cname"; echo "YES:confirmed"; return
+      else
+        save_pending "$cname" "$new_s" "$pts" "$phits"; echo "NO:pending"; return
+      fi
     fi
   fi
   save_pending "$cname" "$new_s"
@@ -281,7 +316,7 @@ should_accept(){
 }
 
 ###############################################################################
-# MQTT Discovery (retained) — с таймаутом, чтобы не виснуть
+# MQTT Discovery (retained) — с таймаутом
 ###############################################################################
 config_payload_1='{"name":"Energy Meter 1.8.0","state_topic":"'"$MQTT_TOPIC_1"'","unique_id":"energy_meter_1_8_0","unit_of_measurement":"kWh","value_template":"{{ value_json.value }}","json_attributes_topic":"'"$MQTT_TOPIC_1"'"}'
 config_payload_2='{"name":"Energy Meter 2.8.0","state_topic":"'"$MQTT_TOPIC_2"'","unique_id":"energy_meter_2_8_0","unit_of_measurement":"kWh","value_template":"{{ value_json.value }}","json_attributes_topic":"'"$MQTT_TOPIC_2"'"}'
@@ -295,11 +330,17 @@ with_timeout 5 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWO
 ###############################################################################
 while true; do
   log_debug "Скачивание скриншота…"
+  ts_cycle="$(date +%s)"
   with_timeout 8 curl -fsSL --connect-timeout 5 --max-time 7 -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL"
   if [ $? -ne 0 ] || [ ! -s "$SCRIPT_DIR/full.jpg" ]; then
     log_error "Не удалось получить full.jpg"
     sleep "$SLEEP_INTERVAL"
     continue
+  fi
+
+  if normalize_bool "$CALIBRATE_DUMP"; then
+    mkdir -p "$DUMP_DIR/$ts_cycle"
+    cp "$SCRIPT_DIR/full.jpg" "$DUMP_DIR/$ts_cycle/full.jpg"
   fi
 
   RAW_DPI=$(identify -format "%x" "$SCRIPT_DIR/full.jpg" 2>/dev/null || echo "")
@@ -312,6 +353,7 @@ while true; do
   # --- КОД ---
   log_debug "Обрезка CODE: $CODE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; sleep "$SLEEP_INTERVAL"; continue; }
+  if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/$ts_cycle/code.jpg"; fi
   CODE_NORM="$(read_code_best "$SCRIPT_DIR/code.jpg")"
   log_debug "КОД(best)='${CODE_NORM}'"
 
@@ -321,6 +363,7 @@ while true; do
     # --- ЗНАЧЕНИЕ ---
     log_debug "Код интересен ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
     convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
+    if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/$ts_cycle/value.jpg"; fi
 
     st_pair="$(load_state_pair "$(echo "$CODE_NORM" | tr . _ )")"
     prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
