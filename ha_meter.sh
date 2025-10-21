@@ -23,7 +23,6 @@ log_error() {
 SCRIPT_DIR=$(dirname "$0")
 
 # URL для получения скриншота с камеры
-#CAMERA_URL="http://192.168.8.84:11080/endpoint/@scrypted/webhook/public/260/43f2d459c931e58b/takePicture"
 CAMERA_URL="http://192.168.8.195/cgi-bin/CGIProxy.fcgi?cmd=snapPicture2&usr=admin&pwd=t1010113"
 
 # MQTT-настройки
@@ -42,10 +41,6 @@ MQTT_CONFIG_TOPIC_2="homeassistant/sensor/energy_meter_2_8_0/config"
 # Интервалы (сек)
 SLEEP_INTERVAL=1   # Основной интервал между итерациями
 EXTRA_PAUSE=108     # Дополнительная пауза после публикации кода 2.8.0
-
-# Координаты обрезки for aqara (фиксированные для обоих кодов)
-#CODE_CROP="120x44+680+520"    # Область с кодом (1.8.0 / 2.8.0)
-#VALUE_CROP="311x68+878+507"   # Область со значением (крупные цифры)
 
 # Координаты обрезки Foscam (фиксированные для обоих кодов)
 CODE_CROP="64x23+576+361"    # Область с кодом (1.8.0 / 2.8.0)
