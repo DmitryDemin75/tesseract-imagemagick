@@ -310,7 +310,12 @@ allowed_jump_units(){ # $1=code $2=dt_sec
   [ "$dt" -lt 1 ] && dt=1
   local dt_cap=$(( MAX_GAP_DAYS_CAP * 86400 ))
   [ "$dt" -gt "$dt_cap" ] && dt="$dt_cap"
-  local kwh_day; if [ "$code" = "1.8.0" ] then kwh_day="$DAILY_MAX_KWH_1_8_0"; else kwh_day="$DAILY_MAX_KWH_2_8_0"; fi
+  local kwh_day
+  if [ "$code" = "1.8.0" ]; then
+    kwh_day="$DAILY_MAX_KWH_1_8_0"
+  else
+    kwh_day="$DAILY_MAX_KWH_2_8_0"
+  fi
   local allowed
   allowed="$(awk -v dt="$dt" -v kwh="$kwh_day" -v burst="$BURST_MULT" -v dec="$VALUE_DECIMALS" 'BEGIN{ s=1; for(i=0;i<dec;i++) s*=10; v=kwh*(dt/86400.0)*s*burst; if(v<1)v=1; printf("%.0f",v); }')"
   [ "$allowed" -lt "$MIN_STEP_UNITS" ] && echo "$MIN_STEP_UNITS" || echo "$allowed"
@@ -448,7 +453,7 @@ while true; do
     # КОД
     log_debug "Обрезка CODE: $CODE_ROI"
     convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
-    [ "$(normalize_bool "$CALIBRATE_DUMP"; echo $?)" -eq 0 ] && mkdir -p "$DUMP_DIR" && cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/code_try${i}.jpg"
+    if normalize_bool "$CALIBRATE_DUMP"; then mkdir -p "$DUMP_DIR"; cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/code_try${i}.jpg"; fi
 
     CODE_NORM="$(read_code_best "$SCRIPT_DIR/code.jpg")"
     log_debug "КОД(best)='${CODE_NORM}' (try $i/$CODE_BURST_TRIES)"
@@ -482,7 +487,7 @@ while true; do
   # ЗНАЧЕНИЕ — из того же full.jpg
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
-  [ "$(normalize_bool "$CALIBRATE_DUMP"; echo $?)" -eq 0 ] && cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/value_last.jpg"
+  if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/value_last.jpg"; fi
 
   st_pair="$(load_state_pair "$(echo "$CODE_NORM" | tr . _ )")"
   prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
