@@ -1,8 +1,8 @@
 {
   "name": "Tesseract and ImageMagick Seven segments displays OCR",
-  "version": "0.3.1",
+  "version": "0.4.0-simple",
   "slug": "tesseract_imagemagick",
-  "description": "Tesseract and ImageMagick for Seven segments displays OCR",
+  "description": "Simple, robust OCR for 7-seg meters (strict code, same-frame value, anti-jump)",
   "arch": ["armv7", "armhf", "aarch64", "amd64", "i386"],
   "startup": "services",
   "boot": "auto",
@@ -37,28 +37,16 @@
     "min_step_units": 1,
     "max_gap_days_cap": 3,
 
+    "double_confirm": false,
     "stable_hits": 2,
-    "stable_hits_cold": 3,
-    "pending_ttl_sec": 60,
+    "stable_hits_cold": 2,
+    "pending_ttl_sec": 30,
 
-    "code_strict": true,
-    "code_gate_enabled": false,
-    "code_stable_hits": 2,
-    "code_pending_ttl_sec": 5,
-
-    "code_burst_tries": 3,
+    "code_burst_tries": 2,
     "code_burst_delay_s": 0.15,
-
-    "code_template_threshold": 0.22,
-    "code_template_margin": 0.04,
-
-    "value_vote_quorum": 2,
 
     "tess_lang": "ssd_int",
     "state_dir": "/data/state",
-
-    "calibrate_dump": false,
-    "dump_dir": "/share/ocr-debug",
 
     "log_to_file": true,
     "log_file": "/data/ha_meter.log",
@@ -94,27 +82,16 @@
     "min_step_units": "int",
     "max_gap_days_cap": "int",
 
+    "double_confirm": "bool",
     "stable_hits": "int",
     "stable_hits_cold": "int",
     "pending_ttl_sec": "int",
 
-    "code_strict": "bool",
-    "code_gate_enabled": "bool",
-    "code_stable_hits": "int",
-    "code_pending_ttl_sec": "int",
-
     "code_burst_tries": "int",
     "code_burst_delay_s": "float",
-    "code_template_threshold": "float",
-    "code_template_margin": "float",
-
-    "value_vote_quorum": "int",
 
     "tess_lang": "str",
     "state_dir": "str",
-
-    "calibrate_dump": "bool",
-    "dump_dir": "str",
 
     "log_to_file": "bool",
     "log_file": "str",
