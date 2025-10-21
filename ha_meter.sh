@@ -1,10 +1,19 @@
 #!/bin/bash
 # ha_meter.sh — OCR 7-segment + анти-скачок + двойное подтверждение
 
-# ---------- базовые утилиты ----------
-DEBUG=1
-log_debug(){ [ "$DEBUG" -eq 1 ] && echo "[DEBUG] $*"; }
-log_error(){ echo "[ERROR] $*" >&2; }
+# ----- отладка и логирование (универсально для 1/0/true/false/yes/no/on/off) -----
+DEBUG="${DEBUG:-1}"
+
+normalize_bool() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)  return 0 ;;  # истина
+    0|false|no|off|"") return 1 ;;  # ложь
+    *)              return 0 ;;  # всё прочее трактуем как истину по-умолчанию
+  esac
+}
+
+log_debug() { normalize_bool "$DEBUG" && echo "[DEBUG] $*"; }
+log_error() { echo "[ERROR] $*" >&2; }
 
 # ---------- чтение опций ----------
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
