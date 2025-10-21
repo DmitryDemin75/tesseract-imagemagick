@@ -1,6 +1,6 @@
 {
   "name": "Tesseract and ImageMagick Seven segments displays OCR",
-  "version": "0.2.7",
+  "version": "0.2.3",
   "slug": "tesseract_imagemagick",
   "description": "Tesseract and ImageMagick for Seven segments displays OCR",
   "arch": ["armv7", "armhf", "aarch64", "amd64", "i386"],
@@ -45,6 +45,9 @@
     "code_gate_enabled": false,
     "code_stable_hits": 2,
     "code_pending_ttl_sec": 5,
+
+    "code_burst_tries": 3,
+    "code_burst_delay_s": 0.15,
 
     "tess_lang": "ssd_int",
     "state_dir": "/data/state",
@@ -94,6 +97,9 @@
     "code_gate_enabled": "bool",
     "code_stable_hits": "int",
     "code_pending_ttl_sec": "int",
+
+    "code_burst_tries": "int",
+    "code_burst_delay_s": "float",
 
     "tess_lang": "str",
     "state_dir": "str",
