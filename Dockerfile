@@ -1,20 +1,20 @@
 FROM debian:bullseye-slim
 
-# Обновление и установка зависимостей
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      bash \
-      jq \
       tesseract-ocr \
       imagemagick \
       curl \
+      jq \
+      coreutils \
       mosquitto-clients && \
     rm -rf /var/lib/apt/lists/*
 
-# Копируем скрипт и обученную модель
+# Скрипт и модель
 COPY ha_meter.sh /ha_meter.sh
 COPY ssd_int.traineddata /ssd_int.traineddata
 RUN chmod +x /ha_meter.sh
 
-# Точка входа
 CMD ["/ha_meter.sh"]
