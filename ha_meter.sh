@@ -260,7 +260,7 @@ should_accept(){
   # $1=code (1.8.0|2.8.0), $2=new_str_digits
   local code="$1" new_s="$2"
   [ -z "$new_s" ] && { echo "NO:empty"; return; }
-  local len=${#new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; }
+  local len=${#new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; fi
 
   local cname; cname="$(echo "$code" | tr . _ )"
   local line last_s="" last_ts=0 now_ts
@@ -289,14 +289,19 @@ should_accept(){
   fi
 
   # --- Обычный режим: монотонность + анти-скачок + double-confirm ---
-  local last_i=$(intval "$last_s"); local new_i=$(intval "$new_s")
+  local last_i; last_i=$(intval "$last_s")
+  local new_i;  new_i=$(intval "$new_s")
 
+  # монотонность
   if [ "$last_i" -gt 0 ] && [ "$new_i" -lt "$last_i" ]; then echo "NO:monotonic"; return; fi
 
+  # динамический анти-скачок
   local dt=$(( now_ts - last_ts )); [ "$dt" -lt 1 ] && dt=1
-  local allowed=$(allowed_jump_units "$code" "$dt"); local diff=$(( new_i - last_i ))
+  local allowed; allowed=$(allowed_jump_units "$code" "$dt")
+  local diff=$(( new_i - last_i ))
   if [ "$last_i" -gt 0 ] && [ "$diff" -gt "$allowed" ]; then echo "NO:jump($diff>$allowed)"; return; fi
 
+  # двойное подтверждение
   local p pv rest pts phits age
   p="$(load_pending "$cname")"
   if [ -n "$p" ]; then
@@ -314,7 +319,6 @@ should_accept(){
   save_pending "$cname" "$new_s"
   echo "NO:pending"
 }
-
 ###############################################################################
 # MQTT Discovery (retained) — с таймаутом
 ###############################################################################
