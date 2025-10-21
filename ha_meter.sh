@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# ha_meter.sh — OCR 7-seg + burst-съёмка кода + строгий код + double-confirm по VALUE + анти-скачок
-# VALUE всегда читается из того же кадра, где распознан код.
+# ha_meter.sh — OCR 7-seg: код по шаблонам (RMSE) + строгий OCR, VALUE с кворумом голосов + double-confirm + анти-скачок
+# VALUE всегда из того же кадра, что и код.
 
 ###############################################################################
 # Отладка/логирование
@@ -67,6 +67,11 @@ if command -v jq >/dev/null 2>&1 && [ -f "$OPTS_FILE" ]; then
   CODE_BURST_TRIES="$(jq -r '.code_burst_tries // 3' "$OPTS_FILE")"
   CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // 0.15' "$OPTS_FILE")"
 
+  CODE_TPL_THR="$(jq -r '.code_template_threshold // 0.22' "$OPTS_FILE")"
+  CODE_TPL_MARGIN="$(jq -r '.code_template_margin // 0.04' "$OPTS_FILE")"
+
+  VALUE_VOTE_QUORUM="$(jq -r '.value_vote_quorum // 2' "$OPTS_FILE")"
+
   TESS_LANG="$(jq -r '.tess_lang // "ssd_int"' "$OPTS_FILE")"
   STATE_DIR="$(jq -r '.state_dir // "/data/state"' "$OPTS_FILE")"
 
@@ -110,6 +115,11 @@ else
   CODE_BURST_TRIES=3
   CODE_BURST_DELAY_S=0.15
 
+  CODE_TPL_THR=0.22
+  CODE_TPL_MARGIN=0.04
+
+  VALUE_VOTE_QUORUM=2
+
   TESS_LANG="ssd_int"
   STATE_DIR="$SCRIPT_DIR/state"
 
@@ -148,6 +158,9 @@ with_timeout(){ local sec="$1"; shift; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_B
 STATE_DIR="${STATE_DIR:-$SCRIPT_DIR/state}"
 mkdir -p "$STATE_DIR"
 
+tpl_18="$STATE_DIR/tpl_1_8_0.png"
+tpl_28="$STATE_DIR/tpl_2_8_0.png"
+
 load_state_pair(){
   local code="$1" f="$STATE_DIR/last_${code}.txt"
   if [ -s "$f" ]; then
@@ -182,7 +195,7 @@ if command -v mosquitto_sub >/dev/null 2>&1; then
 fi
 
 ###############################################################################
-# Левенштейн
+# Левенштейн (больше не используем для кода; оставил на всякий случай)
 ###############################################################################
 lev(){
   awk -v s="$1" -v t="$2" '
@@ -207,10 +220,9 @@ lev(){
 ###############################################################################
 # Препроцесс (IM6)
 ###############################################################################
-pp_code_A(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -sigmoidal-contrast 6x50% -contrast-stretch 0.5%x0.5% -gamma 1.10 -blur 0x0.3 -threshold 58% -type bilevel "$2"; }
-pp_code_B(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -contrast-stretch 1%x1% -gamma 1.00 -threshold 60% -type bilevel "$2"; }
-pp_code_C(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -clahe 40x40+10+2 -sigmoidal-contrast 5x50% -threshold 56% -type bilevel "$2" 2>/dev/null || cp "$1" "$2"; }
-pp_code_D(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -clahe 40x40+10+2 -adaptive-threshold 29x29+8% -type bilevel "$2" 2>/dev/null || cp "$1" "$2"; }
+# Код → бинарное изображение фиксированного размера для шаблонов
+pp_code_bin(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -contrast-stretch 1%x1% -gamma 1.00 -threshold 60% -type bilevel -resize 240x64\! "$2"; }
+pp_code_alt(){ convert "$1" -auto-orient -colorspace Gray -resize 350% -clahe 40x40+10+2 -adaptive-threshold 29x29+8% -type bilevel -resize 240x64\! "$2" 2>/dev/null || cp "$1" "$2"; }
 
 pp_val_A(){ convert "$1" -auto-orient -colorspace Gray -clahe 64x64+10+2 -sigmoidal-contrast 6x50% -deskew 40% -resize 300% -adaptive-threshold 41x41+8% -type bilevel -morphology Close Diamond:1 "$2" 2>/dev/null || cp "$1" "$2"; }
 pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5% -gamma 1.10 -resize 300% -threshold 52% -type bilevel "$2"; }
@@ -220,20 +232,6 @@ pp_val_C(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.3%x0.3
 # OCR
 ###############################################################################
 ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
-clean_code(){  echo "$1" | tr -cd '0128.\n' | xargs; }
-clean_value(){ echo "$1" | tr -cd '0-9\n'   | xargs; }
-
-norm_code(){
-  local raw="$1"; local s="$(clean_code "$raw")"; s="$(echo "$s" | sed 's/\.\././g')"
-  local d1="$(lev "$s" "1.8.0")"; local d2="$(lev "$s" "2.8.0")"
-  local thr=2
-  if [ "$d1" -le "$thr" ] || [ "$d2" -le "$thr" ]; then
-    [ "$d1" -le "$d2" ] && echo "1.8.0" || echo "2.8.0"
-  else
-    echo ""
-  fi
-}
-
 ocr_code_strict(){
   local img="$1" uw out
   uw="$(mktemp --suffix=.words)"; printf "1.8.0\n2.8.0\n" > "$uw"
@@ -242,64 +240,88 @@ ocr_code_strict(){
   rm -f "$uw"
   case "$out" in "1.8.0"|"2.8.0") echo "$out" ;; *) echo "" ;; esac
 }
+digits(){ echo "$1" | tr -cd '0-9'; }
 
-read_code_best(){
-  local in="$1"
-  # строгий путь (psm=8), затем adaptive, затем fallback
-  if normalize_bool "$CODE_STRICT"; then
-    local t="$(mktemp --suffix=.png)"
-    pp_code_B "$in" "$t"
-    local s; s="$(ocr_code_strict "$t")"
-    rm -f "$t"
-    [ -n "$s" ] && { echo "$s"; return; }
-    t="$(mktemp --suffix=.png)"
-    pp_code_D "$in" "$t"
-    s="$(ocr_code_strict "$t")"
-    rm -f "$t"
-    [ -n "$s" ] && { echo "$s"; return; }
+###############################################################################
+# Шаблонное сравнение кода (ImageMagick compare -metric RMSE)
+###############################################################################
+has_compare(){ command -v compare >/dev/null 2>&1; }
+diff_score(){ # печатает нормализованный RMSE (в скобках)
+  local a="$1" b="$2"
+  compare -metric RMSE "$a" "$b" null: 2>&1 | awk -F'[()]' '{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}'
+}
+code_by_templates(){
+  local bin="$1" best="" s18="" s28=""
+  has_compare || { echo ""; return; }
+  [ -s "$tpl_18" ] || [ -s "$tpl_28" ] || { echo ""; return; }
+
+  if [ -s "$tpl_18" ]; then s18="$(diff_score "$bin" "$tpl_18" 2>/dev/null || echo "")"; fi
+  if [ -s "$tpl_28" ]; then s28="$(diff_score "$bin" "$tpl_28" 2>/dev/null || echo "")"; fi
+  [ -z "$s18$s28" ] && { echo ""; return; }
+
+  # Чем меньше RMSE — тем похожее
+  local thr="${CODE_TPL_THR:-0.22}" margin="${CODE_TPL_MARGIN:-0.04}"
+  if [ -n "$s18" ] && { awk -v x="$s18" -v t="$thr" 'BEGIN{exit !(x<t)}'; }; then
+    if [ -n "$s28" ]; then
+      # нужна разница больше margin
+      awk -v a="$s28" -v b="$s18" -v m="$margin" 'BEGIN{exit !((a-b)>m)}' && best="1.8.0"
+    else
+      best="1.8.0"
+    fi
   fi
-  # fallback: 4 ветки, psm=8 → при пустоте psm=7
-  local a b c d tA tB tC tD nA nB nC nD out=""
-  a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"; c="$(mktemp --suffix=.png)"; d="$(mktemp --suffix=.png)"
-  pp_code_A "$in" "$a"; pp_code_B "$in" "$b"; pp_code_C "$in" "$c"; pp_code_D "$in" "$d"
-  tA="$(ocr_txt "$a" 8 '0128.')"; tB="$(ocr_txt "$b" 8 '0128.')"; tC="$(ocr_txt "$c" 8 '0128.')"; tD="$(ocr_txt "$d" 8 '0128.')"
-  nA="$(norm_code "$tA")"; nB="$(norm_code "$tB")"; nC="$(norm_code "$tC")"; nD="$(norm_code "$tD")"
-  if [ -z "$nA$nB$nC$nD" ]; then
-    tA="$(ocr_txt "$a" 7 '0128.')"; tB="$(ocr_txt "$b" 7 '0128.')"; tC="$(ocr_txt "$c" 7 '0128.')"; tD="$(ocr_txt "$d" 7 '0128.')"
-    nA="$(norm_code "$tA")"; nB="$(norm_code "$tB")"; nC="$(norm_code "$tC")"; nD="$(norm_code "$tD")"
+  if [ -z "$best" ] && [ -n "$s28" ] && { awk -v x="$s28" -v t="$thr" 'BEGIN{exit !(x<t)}'; }; then
+    if [ -n "$s18" ]; then
+      awk -v a="$s18" -v b="$s28" -v m="$margin" 'BEGIN{exit !((a-b)>m)}' && best="2.8.0"
+    else
+      best="2.8.0"
+    fi
   fi
-  rm -f "$a" "$b" "$c" "$d"
-  for candidate in "1.8.0" "2.8.0"; do
-    local cnt=0
-    [ "$nA" = "$candidate" ] && cnt=$((cnt+1))
-    [ "$nB" = "$candidate" ] && cnt=$((cnt+1))
-    [ "$nC" = "$candidate" ] && cnt=$((cnt+1))
-    [ "$nD" = "$candidate" ] && cnt=$((cnt+1))
-    if [ "$cnt" -ge 2 ]; then out="$candidate"; break; fi
-  done
-  echo "$out"
+
+  if normalize_bool "$DEBUG"; then
+    [ -n "$s18" ] && log_debug "TMPL RMSE: 1.8.0=$s18"
+    [ -n "$s28" ] && log_debug "TMPL RMSE: 2.8.0=$s28"
+    [ -n "$best" ] && log_debug "TMPL PICK: $best"
+  fi
+  echo "$best"
+}
+save_template_if_missing(){
+  local code="$1" bin="$2"
+  if [ "$code" = "1.8.0" ] && [ ! -s "$tpl_18" ]; then cp "$bin" "$tpl_18"; log_debug "Template saved: $tpl_18"; fi
+  if [ "$code" = "2.8.0" ] && [ ! -s "$tpl_28" ]; then cp "$bin" "$tpl_28"; log_debug "Template saved: $tpl_28"; fi
 }
 
-digits(){ echo "$1" | tr -cd '0-9'; }
-read_value_best(){ # $1=img $2=prev_value_int
+###############################################################################
+# Чтение значения с кворумом голосов
+###############################################################################
+read_value_votes(){ # $1=img $2=prev_value_int => echo "<best> <votes> <total>"
   local in="$1" prev="$2"
   local a="$(mktemp --suffix=.png)" b="$(mktemp --suffix=.png)" c="$(mktemp --suffix=.png)"
   pp_val_A "$in" "$a"; local vA="$(digits "$(ocr_txt "$a" 7 '0123456789')")"
   pp_val_B "$in" "$b"; local vB="$(digits "$(ocr_txt "$b" 7 '0123456789')")"
   pp_val_C "$in" "$c"; local vC="$(digits "$(ocr_txt "$c" 7 '0123456789')")"
   rm -f "$a" "$b" "$c"
-  local best=""
-  for v in "$vA" "$vB" "$vC"; do [ -n "$v" ] && echo "$v"; done | sort | uniq -c | sort -nr | awk 'NR==1{print $2}' | read -r best || true
-  if [ -z "$best" ] || [ "$best" = "0" ]; then
-    local bestv=""; local bestd=999999999
+  local total=0; [ -n "$vA" ] && total=$((total+1)); [ -n "$vB" ] && total=$((total+1)); [ -n "$vC" ] && total=$((total+1))
+
+  # голосование
+  local best=""; local votes=0
+  for cand in "$vA" "$vB" "$vC"; do
+    [ -z "$cand" ] && continue
+    local cnt=0; [ "$cand" = "$vA" ] && cnt=$((cnt+1)); [ "$cand" = "$vB" ] && cnt=$((cnt+1)); [ "$cand" = "$vC" ] && cnt=$((cnt+1))
+    if [ "$cnt" -gt "$votes" ]; then best="$cand"; votes="$cnt"; fi
+  done
+
+  # если кворум не набран — берём ближайшее к предыдущему
+  if [ -z "$best" ] || [ "$votes" -lt 2 ]; then
+    local bestv=""; local bestd=999999999; local vi d
     for v in "$vA" "$vB" "$vC"; do
       [ -z "$v" ] && continue
-      local vi=$(intval "$v"); local d=$(( vi>prev ? vi-prev : prev-vi ))
+      vi=$(intval "$v"); d=$(( vi>prev ? vi-prev : prev-vi ))
       if [ "$d" -lt "$bestd" ]; then bestd="$d"; bestv="$v"; fi
     done
-    best="$bestv"
+    [ -n "$bestv" ] && { best="$bestv"; votes=1; }
   fi
-  echo "$best"
+
+  echo "$best $votes $total"
 }
 
 ###############################################################################
@@ -346,7 +368,7 @@ should_accept(){
 
   now_ts=$(date +%s)
 
-  # Cold start: подтверждаем N раз подряд без baseline
+  # Cold start
   if [ -z "$last_s" ]; then
     local p pv rest pts phits age
     p="$(load_pending "$cname")"
@@ -453,21 +475,49 @@ while true; do
     # КОД
     log_debug "Обрезка CODE: $CODE_ROI"
     convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
-    if normalize_bool "$CALIBRATE_DUMP"; then mkdir -p "$DUMP_DIR"; cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/code_try${i}.jpg"; fi
 
-    CODE_NORM="$(read_code_best "$SCRIPT_DIR/code.jpg")"
+    # подготавливаем бинарник для шаблонов
+    bin1="$(mktemp --suffix=.png)"; bin2="$(mktemp --suffix=.png)"
+    pp_code_bin "$SCRIPT_DIR/code.jpg" "$bin1"
+    pp_code_alt "$SCRIPT_DIR/code.jpg" "$bin2"
+
+    # 1) строгий OCR по bin1,bin2
+    CODE_NORM="$(ocr_code_strict "$bin1")"
+    [ -z "$CODE_NORM" ] && CODE_NORM="$(ocr_code_strict "$bin2")"
+
+    # 2) шаблоны, если строгий не сработал
+    if [ -z "$CODE_NORM" ]; then
+      # пробуем оба препроцесса и сравниваем лучшую попытку
+      local pick1 pick2
+      pick1="$(code_by_templates "$bin1")"
+      pick2="$(code_by_templates "$bin2")"
+      if [ -n "$pick1" ] && [ -n "$pick2" ] && [ "$pick1" != "$pick2" ]; then
+        # конфликт: считаем пусто (надёжность важнее)
+        CODE_NORM=""
+      else
+        CODE_NORM="${pick1}${pick2}"
+      fi
+      [ "$CODE_NORM" = "12.8.0" ] && CODE_NORM="" # на всякий случай
+      [ "$CODE_NORM" = "1.8.02.8.0" ] && CODE_NORM=""
+    fi
+
+    # 3) если строгий OCR дал точный код — сохраняем шаблон (если не было)
+    if [ -n "$CODE_NORM" ]; then
+      save_template_if_missing "$CODE_NORM" "$bin1"
+    fi
+
+    rm -f "$bin1" "$bin2"
+
     log_debug "КОД(best)='${CODE_NORM}' (try $i/$CODE_BURST_TRIES)"
 
     if [ -n "$CODE_NORM" ]; then
-      # поймали кадр с кодом — на нём же потом считаем VALUE
+      # поймали кадр с кодом — на нём же считаем VALUE
       break
     fi
 
-    # если не поймали — небольшая задержка и пробуем ещё
     sleep "$CODE_BURST_DELAY_S"
   done
 
-  # если не распознали код ни в одной попытке — пропускаем цикл
   if [ -z "$CODE_NORM" ]; then
     log_debug "DROP CODE: пусто"
     sleep "$SLEEP_INTERVAL"
@@ -487,15 +537,21 @@ while true; do
   # ЗНАЧЕНИЕ — из того же full.jpg
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
-  if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/value_last.jpg"; fi
+  if normalize_bool "$CALIBRATE_DUMP"; then mkdir -p "$DUMP_DIR"; cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/code_last.jpg"; cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/value_last.jpg"; fi
 
   st_pair="$(load_state_pair "$(echo "$CODE_NORM" | tr . _ )")"
   prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
 
-  CAND="$(read_value_best "$SCRIPT_DIR/value.jpg" "$prev_int")"
-  CAND="${CAND##0}"; [ -z "$CAND" ] && CAND="0"
+  read -r CAND VOTES TOTAL <<<"$(read_value_votes "$SCRIPT_DIR/value.jpg" "$prev_int")"
+  [ -z "$CAND" ] && CAND="0"
+  local quorum="${VALUE_VOTE_QUORUM:-2}"
+  if [ "$VOTES" -lt "$quorum" ] && [ "$TOTAL" -ge 2 ]; then
+    log_debug "VOTE $CODE_NORM: кворум не набран (cand=$CAND, votes=$VOTES/$TOTAL) → HOLD"
+    verdict="NO:pending"
+  else
+    verdict="$(should_accept "$CODE_NORM" "$CAND")"
+  fi
 
-  verdict="$(should_accept "$CODE_NORM" "$CAND")"
   case "$verdict" in
     YES:*)       publish_value "$CODE_NORM" "$CAND"; published=1 ;;
     NO:pending)  log_debug "HOLD $CODE_NORM: ждём подтверждение ($CAND)" ;;
