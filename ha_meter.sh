@@ -130,6 +130,10 @@ while true; do
   code=$(echo "$code" | xargs)
   log_debug "Распознан код: '$code'"
 
+  if [ "$code" = "1.8.0" ] || [ "$code" = "18.0" ]; then
+    code = "1.8.0"
+  fi
+
   published=0
 
   # Обрабатываем только коды 1.8.0 и 2.8.0
