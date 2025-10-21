@@ -131,7 +131,7 @@ while true; do
   log_debug "Распознан код: '$code'"
 
   if [ "$code" = "1.8.0" ] || [ "$code" = "18.0" ]; then
-    code = "1.8.0"
+    code="1.8.0"
   fi
 
   published=0
