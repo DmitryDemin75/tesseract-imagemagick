@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# v0.4.1-relaxed — простой и «липкий» к настоящему коду:
-# - Код: OCR → нормализация. Если распознанный текст (даже с мусором) ОКАНЧИВАЕТСЯ на 180/280 → это 1.8.0/2.8.0
-# - VALUE: из того же кадра; 2 простых препроцесса; мягкая проверка скачков
-# - Double-confirm по умолчанию выключен (можно включить в options.json)
-# - Лог очищается при старте, если включено в конфиге
+# v0.4.2-relaxed-fix
+# Исправления:
+# - log_debug -> stderr (не ломает командные подстановки)
+# - Код: relaxed-нормализация (хвост 180/280 => 1.8.0/2.8.0)
+# - Value: из того же кадра; обрезка длины по коду (anti-trash), мягкий анти-скачок
+# - Double-confirm выключен (включаем через options при желании)
+
+set -Eeuo pipefail
 
 ############################
 # Логирование
@@ -19,7 +22,7 @@ DEBUG=1
 LOG_TO_FILE=false
 LOG_FILE=""
 log_write_file(){ if normalize_bool "$LOG_TO_FILE"; then [ -n "$LOG_FILE" ] && echo "$1" >> "$LOG_FILE"; fi; }
-log_debug(){ local msg="[DEBUG] $*"; normalize_bool "$DEBUG" && echo "$msg"; log_write_file "$msg"; }
+log_debug(){ local msg="[DEBUG] $*"; normalize_bool "$DEBUG" && { echo "$msg" >&2; }; log_write_file "$msg"; }
 log_error(){ local msg="[ERROR] $*"; echo "$msg" >&2; log_write_file "$msg"; }
 
 ############################
@@ -28,13 +31,13 @@ log_error(){ local msg="[ERROR] $*"; echo "$msg" >&2; log_write_file "$msg"; }
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 OPTS_FILE="/data/options.json"
 
-# Дефолты (можно переопределить в /data/options.json)
+# Дефолты (переопределяются через /data/options.json)
 CAMERA_URL="http://127.0.0.1/snap.jpg"
 
 CODE_CROP="64x23+576+361"
 VALUE_CROP="138x30+670+353"
 DX=0; DY=0
-PADY_CODE=4      # стало чуть выше по умолчанию, чтобы не «съедать» точки/сегменты
+PADY_CODE=4
 PADY_VALUE=3
 
 MQTT_HOST="localhost"; MQTT_USER="mqtt"; MQTT_PASSWORD="mqtt"
@@ -58,11 +61,17 @@ STABLE_HITS=2
 STABLE_HITS_COLD=2
 PENDING_TTL_SEC=30
 
-CODE_BURST_TRIES=3        # увеличил до 3 по умолчанию, как у тебя в логе
+CODE_BURST_TRIES=3
 CODE_BURST_DELAY_S=0.15
 
 TESS_LANG="ssd_int"
 STATE_DIR="$SCRIPT_DIR/state"
+
+# Ограничение длины числа по коду (anti-trash)
+VAL_MIN_1_8_0=5
+VAL_MAX_1_8_0=7
+VAL_MIN_2_8_0=3
+VAL_MAX_2_8_0=6
 
 LOG_TO_FILE=true
 LOG_FILE="/data/ha_meter.log"
@@ -113,6 +122,12 @@ if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   LOG_TO_FILE="$(jq -r '.log_to_file // env.LOG_TO_FILE' "$OPTS_FILE")"
   LOG_FILE="$(jq -r '.log_file // env.LOG_FILE' "$OPTS_FILE")"
   LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // env.LOG_TRUNCATE_ON_START' "$OPTS_FILE")"
+
+  # Необязательные пределы длины значения
+  VAL_MIN_1_8_0="$(jq -r '.val_min_1_8_0 // env.VAL_MIN_1_8_0' "$OPTS_FILE")"
+  VAL_MAX_1_8_0="$(jq -r '.val_max_1_8_0 // env.VAL_MAX_1_8_0' "$OPTS_FILE")"
+  VAL_MIN_2_8_0="$(jq -r '.val_min_2_8_0 // env.VAL_MIN_2_8_0' "$OPTS_FILE")"
+  VAL_MAX_2_8_0="$(jq -r '.val_max_2_8_0 // env.VAL_MAX_2_8_0' "$OPTS_FILE")"
 fi
 
 # Лог-файл
@@ -134,6 +149,7 @@ shift_roi(){ read -r W H X Y < <(parse_roi "$1"); fmt_roi "$W" "$H" "$((X+DX))" 
 pad_roi_y(){ local roi="$1" pad="$2"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
 intval(){ echo "${1:-0}" | awk '{if($0=="") print 0; else print int($0+0)}'; }
 digits(){ echo "$1" | tr -cd '0-9'; }
+lstrip_zeros(){ local s="${1:-}"; s="$(echo -n "$s" | sed 's/^0\+//')"; [ -z "$s" ] && echo 0 || echo "$s"; }
 
 TIMEOUT_BIN="$(command -v timeout || true)"
 with_timeout(){ local sec="$1"; shift; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
@@ -176,17 +192,17 @@ pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5
 
 ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
 
-# --- Нормализация кода ---
+# Нормализация распознанного кода
 normalize_code_tail(){
-  # На входе «сырое» остроканное: берём только цифры → если ХВОСТ 180/280 → возвращаем 1.8.0/2.8.0
   local raw="$1"
+  # оставим только цифры
   local d; d="$(echo "$raw" | tr -cd '0123456789')"
   case "$d" in
     *180) echo "1.8.0"; return ;;
     *280) echo "2.8.0"; return ;;
   esac
-  # fallback: если прямо внутри есть текст с точками
-  local s; s="$(echo "$raw" | tr -cd '0128.')"    # оставим только «1»,«2»,«8»,«0» и точки
+  # fallback по символам "1.8.0"/"2.8.0"
+  local s; s="$(echo "$raw" | tr -cd '0128.')"    # только 1,2,8,0 и точки
   echo "$s" | grep -q "1\.8\.0" && { echo "1.8.0"; return; }
   echo "$s" | grep -q "2\.8\.0" && { echo "2.8.0"; return; }
   echo ""
@@ -196,18 +212,27 @@ read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
   local in="$1" a b raw norm
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"
-  raw="$(ocr_txt "$a" 7 '0128.')"    # psm 7
+  raw="$(ocr_txt "$a" 7 '0128.')"
   norm="$(normalize_code_tail "$raw")"
-  [ -z "$norm" ] && raw="$(ocr_txt "$a" 8 '0128.')" && norm="$(normalize_code_tail "$raw")"  # psm 8
+  if [ -z "$norm" ]; then
+    raw="$(ocr_txt "$a" 8 '0128.')"
+    norm="$(normalize_code_tail "$raw")"
+  fi
   if [ -z "$norm" ]; then
     pp_code_B "$in" "$b"
     raw="$(ocr_txt "$b" 7 '0128.')"
     norm="$(normalize_code_tail "$raw")"
-    [ -z "$norm" ] && raw="$(ocr_txt "$b" 8 '0128.')" && norm="$(normalize_code_tail "$raw")"
+    if [ -z "$norm" ]; then
+      raw="$(ocr_txt "$b" 8 '0128.')"
+      norm="$(normalize_code_tail "$raw")"
+    fi
   fi
   rm -f "$a" "$b"
+  # лог — только в stderr (не попадёт в $())
   if normalize_bool "$DEBUG"; then
-    [ -n "$raw" ] && log_debug "RAW_CODE='$raw' → NORM='$norm'"
+    # убираем переводы строк в raw для читабельности
+    local raw1; raw1="$(echo -n "$raw" | tr '\n' ' ' | tr -d '\r')"
+    log_debug "RAW_CODE='${raw1}' -> NORM='${norm}'"
   fi
   echo "$norm"
 }
@@ -229,6 +254,20 @@ read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
   echo "$best"
 }
 
+# Обрезка длины значения под конкретный код
+clamp_digits_for_code(){
+  local code="$1" s="$2" min max len
+  if [ "$code" = "1.8.0" ]; then min="$VAL_MIN_1_8_0"; max="$VAL_MAX_1_8_0"; else min="$VAL_MIN_2_8_0"; max="$VAL_MAX_2_8_0"; fi
+  len=${#s}
+  if [ "$len" -gt "$max" ]; then s="${s: -$max}"; fi        # берём правые max цифр (шум — слева)
+  len=${#s}
+  if [ "$len" -lt "$min" ]; then echo ""; return; fi
+  echo "$s"
+}
+
+############################
+# Принятие/публикация
+############################
 should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
   local code="$1" new_s="$2"
   [ -z "$new_s" ] && { echo "NO:empty"; return; }
@@ -250,14 +289,6 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
   local allowed; allowed="$(allowed_jump_units "$code" "$dt")"
   local diff=$(( new_i - last_i ))
   if [ "$last_i" -gt 0 ] && [ "$diff" -gt "$allowed" ]; then echo "NO:jump($diff>$allowed)"; return; fi
-
-  if normalize_bool "$DOUBLE_CONFIRM"; then
-    local f="$STATE_DIR/pending_${cname}.txt" pv pts phits age
-    if [ -s "$f" ]; then
-      pv="${pv%%|*}"; pts="${pts%%|*}"; phits="${phits#*|}"
-    fi
-    # упрощённый: публикуем сразу при выключенном DOUBLE_CONFIRM
-  fi
 
   echo "YES:ok"
 }
@@ -287,7 +318,6 @@ with_timeout 5 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWO
 while true; do
   published=0
 
-  # --- несколько попыток поймать кадр, где виден код ---
   CODE_NORM=""
   for ((i=1; i<=CODE_BURST_TRIES; i++)); do
     log_debug "Скачивание скриншота… (try $i/$CODE_BURST_TRIES)"
@@ -303,7 +333,7 @@ while true; do
 
     convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
     CODE_NORM="$(read_code_relaxed "$SCRIPT_DIR/code.jpg")"
-    log_debug "КОД='${CODE_NORM}' (try $i/$CODE_BURST_TRIES)"
+    log_debug "КОД='${CODE_NORM:-}' (try $i/$CODE_BURST_TRIES)"
     if [ -n "$CODE_NORM" ]; then break; fi
     sleep "$CODE_BURST_DELAY_S"
   done
@@ -314,7 +344,7 @@ while true; do
     continue
   fi
 
-  # --- значение из того же кадра ---
+  # Значение — из того же кадра
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
 
@@ -322,9 +352,14 @@ while true; do
   prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
 
   CAND="$(read_value_simple "$SCRIPT_DIR/value.jpg" "$prev_int")"
-  CAND="${CAND##0}"; [ -z "$CAND" ] && CAND="0"
-  verdict="$(should_accept_value "$CODE_NORM" "$CAND")"
+  CAND="$(clamp_digits_for_code "$CODE_NORM" "$CAND")"
+  if [ -z "$CAND" ]; then
+    log_debug "DROP $CODE_NORM: неподходящая длина (после clamp)"
+    sleep "$SLEEP_INTERVAL"; continue
+  fi
+  CAND="$(lstrip_zeros "$CAND")"
 
+  verdict="$(should_accept_value "$CODE_NORM" "$CAND")"
   case "$verdict" in
     YES:*)       publish_value "$CODE_NORM" "$CAND"; published=1 ;;
     NO:pending)  log_debug "HOLD $CODE_NORM: ждём подтверждение ($CAND)" ;;
