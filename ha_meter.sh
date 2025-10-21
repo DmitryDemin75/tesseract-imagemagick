@@ -432,7 +432,7 @@ while true; do
 
   if [ $published -eq 0 ]; then
     sleep "$SLEEP_INTERVAL"
-  elif [ "$CODE_NORM" = "2.8.0" ]; then
-    sleep "$EXTRA_PAUSE"
+  #elif [ "$CODE_NORM" = "2.8.0" ]; then
+  #  sleep "$EXTRA_PAUSE"
   fi
 done
