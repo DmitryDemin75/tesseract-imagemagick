@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
-# v0.4.0-simple — максимально упрощённая и надёжная версия
-# - Код: только строгий OCR (user-words, whitelist), два простых препроцесса, PSM 8→7
-# - VALUE: читается из того же кадра; без голосований; мягкая эвристика выбора
-# - Анти-скачок: по дневным лимитам; можно ослабить в config
-# - Double confirm отключён по умолчанию (config.double_confirm=false)
-# - Лог чистится на старте (если log_truncate_on_start=true)
-
-set -euo pipefail
+# v0.4.1-relaxed — простой и «липкий» к настоящему коду:
+# - Код: OCR → нормализация. Если распознанный текст (даже с мусором) ОКАНЧИВАЕТСЯ на 180/280 → это 1.8.0/2.8.0
+# - VALUE: из того же кадра; 2 простых препроцесса; мягкая проверка скачков
+# - Double-confirm по умолчанию выключен (можно включить в options.json)
+# - Лог очищается при старте, если включено в конфиге
 
 ############################
 # Логирование
@@ -31,11 +28,14 @@ log_error(){ local msg="[ERROR] $*"; echo "$msg" >&2; log_write_file "$msg"; }
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 OPTS_FILE="/data/options.json"
 
-# Значения по умолчанию
+# Дефолты (можно переопределить в /data/options.json)
 CAMERA_URL="http://127.0.0.1/snap.jpg"
+
 CODE_CROP="64x23+576+361"
 VALUE_CROP="138x30+670+353"
-DX=0; DY=0; PADY_CODE=2; PADY_VALUE=3
+DX=0; DY=0
+PADY_CODE=4      # стало чуть выше по умолчанию, чтобы не «съедать» точки/сегменты
+PADY_VALUE=3
 
 MQTT_HOST="localhost"; MQTT_USER="mqtt"; MQTT_PASSWORD="mqtt"
 MQTT_TOPIC_1="homeassistant/sensor/energy_meter/1_8_0/state"
@@ -43,7 +43,8 @@ MQTT_TOPIC_2="homeassistant/sensor/energy_meter/2_8_0/state"
 MQTT_CONFIG_TOPIC_1="homeassistant/sensor/energy_meter_1_8_0/config"
 MQTT_CONFIG_TOPIC_2="homeassistant/sensor/energy_meter_2_8_0/config"
 
-SLEEP_INTERVAL=1; EXTRA_PAUSE=108
+SLEEP_INTERVAL=1
+EXTRA_PAUSE=108
 
 VALUE_DECIMALS=3
 DAILY_MAX_KWH_1_8_0=200
@@ -57,59 +58,61 @@ STABLE_HITS=2
 STABLE_HITS_COLD=2
 PENDING_TTL_SEC=30
 
-CODE_BURST_TRIES=2
+CODE_BURST_TRIES=3        # увеличил до 3 по умолчанию, как у тебя в логе
 CODE_BURST_DELAY_S=0.15
 
 TESS_LANG="ssd_int"
 STATE_DIR="$SCRIPT_DIR/state"
 
+LOG_TO_FILE=true
+LOG_FILE="/data/ha_meter.log"
 LOG_TRUNCATE_ON_START=true
 
-# Чтение /data/options.json
+# Читаем /data/options.json (если есть)
 if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   DEBUG="$(jq -r '.debug // true' "$OPTS_FILE")"
 
-  CAMERA_URL="$(jq -r '.camera_url // "http://127.0.0.1/snap.jpg"' "$OPTS_FILE")"
+  CAMERA_URL="$(jq -r '.camera_url // env.CAMERA_URL' "$OPTS_FILE")"
 
-  CODE_CROP="$(jq -r '.code_crop // "64x23+576+361"' "$OPTS_FILE")"
-  VALUE_CROP="$(jq -r '.value_crop // "138x30+670+353"' "$OPTS_FILE")"
-  DX="$(jq -r '.dx // 0' "$OPTS_FILE")"
-  DY="$(jq -r '.dy // 0' "$OPTS_FILE")"
-  PADY_CODE="$(jq -r '.pady_code // 2' "$OPTS_FILE")"
-  PADY_VALUE="$(jq -r '.pady_value // 3' "$OPTS_FILE")"
+  CODE_CROP="$(jq -r '.code_crop // env.CODE_CROP' "$OPTS_FILE")"
+  VALUE_CROP="$(jq -r '.value_crop // env.VALUE_CROP' "$OPTS_FILE")"
+  DX="$(jq -r '.dx // env.DX' "$OPTS_FILE")"
+  DY="$(jq -r '.dy // env.DY' "$OPTS_FILE")"
+  PADY_CODE="$(jq -r '.pady_code // env.PADY_CODE' "$OPTS_FILE")"
+  PADY_VALUE="$(jq -r '.pady_value // env.PADY_VALUE' "$OPTS_FILE")"
 
-  MQTT_HOST="$(jq -r '.mqtt_host // "localhost"' "$OPTS_FILE")"
-  MQTT_USER="$(jq -r '.mqtt_user // "mqtt"' "$OPTS_FILE")"
-  MQTT_PASSWORD="$(jq -r '.mqtt_password // "mqtt"' "$OPTS_FILE")"
-  MQTT_TOPIC_1="$(jq -r '.mqtt_topic_1_8_0 // "homeassistant/sensor/energy_meter/1_8_0/state"' "$OPTS_FILE")"
-  MQTT_TOPIC_2="$(jq -r '.mqtt_topic_2_8_0 // "homeassistant/sensor/energy_meter/2_8_0/state"' "$OPTS_FILE")"
-  MQTT_CONFIG_TOPIC_1="$(jq -r '.mqtt_discovery_topic_1 // "homeassistant/sensor/energy_meter_1_8_0/config"' "$OPTS_FILE")"
-  MQTT_CONFIG_TOPIC_2="$(jq -r '.mqtt_discovery_topic_2 // "homeassistant/sensor/energy_meter_2_8_0/config"' "$OPTS_FILE")"
+  MQTT_HOST="$(jq -r '.mqtt_host // env.MQTT_HOST' "$OPTS_FILE")"
+  MQTT_USER="$(jq -r '.mqtt_user // env.MQTT_USER' "$OPTS_FILE")"
+  MQTT_PASSWORD="$(jq -r '.mqtt_password // env.MQTT_PASSWORD' "$OPTS_FILE")"
+  MQTT_TOPIC_1="$(jq -r '.mqtt_topic_1_8_0 // env.MQTT_TOPIC_1' "$OPTS_FILE")"
+  MQTT_TOPIC_2="$(jq -r '.mqtt_topic_2_8_0 // env.MQTT_TOPIC_2' "$OPTS_FILE")"
+  MQTT_CONFIG_TOPIC_1="$(jq -r '.mqtt_discovery_topic_1 // env.MQTT_CONFIG_TOPIC_1' "$OPTS_FILE")"
+  MQTT_CONFIG_TOPIC_2="$(jq -r '.mqtt_discovery_topic_2 // env.MQTT_CONFIG_TOPIC_2' "$OPTS_FILE")"
 
-  SLEEP_INTERVAL="$(jq -r '.sleep_interval // 1' "$OPTS_FILE")"
-  EXTRA_PAUSE="$(jq -r '.extra_pause_after_2_8_0 // 108' "$OPTS_FILE")"
+  SLEEP_INTERVAL="$(jq -r '.sleep_interval // env.SLEEP_INTERVAL' "$OPTS_FILE")"
+  EXTRA_PAUSE="$(jq -r '.extra_pause_after_2_8_0 // env.EXTRA_PAUSE' "$OPTS_FILE")"
 
-  VALUE_DECIMALS="$(jq -r '.value_decimals // 3' "$OPTS_FILE")"
-  DAILY_MAX_KWH_1_8_0="$(jq -r '.daily_max_kwh_1_8_0 // 200' "$OPTS_FILE")"
-  DAILY_MAX_KWH_2_8_0="$(jq -r '.daily_max_kwh_2_8_0 // 50' "$OPTS_FILE")"
-  BURST_MULT="$(jq -r '.burst_mult // 2.0' "$OPTS_FILE")"
-  MIN_STEP_UNITS="$(jq -r '.min_step_units // 1' "$OPTS_FILE")"
-  MAX_GAP_DAYS_CAP="$(jq -r '.max_gap_days_cap // 3' "$OPTS_FILE")"
+  VALUE_DECIMALS="$(jq -r '.value_decimals // env.VALUE_DECIMALS' "$OPTS_FILE")"
+  DAILY_MAX_KWH_1_8_0="$(jq -r '.daily_max_kwh_1_8_0 // env.DAILY_MAX_KWH_1_8_0' "$OPTS_FILE")"
+  DAILY_MAX_KWH_2_8_0="$(jq -r '.daily_max_kwh_2_8_0 // env.DAILY_MAX_KWH_2_8_0' "$OPTS_FILE")"
+  BURST_MULT="$(jq -r '.burst_mult // env.BURST_MULT' "$OPTS_FILE")"
+  MIN_STEP_UNITS="$(jq -r '.min_step_units // env.MIN_STEP_UNITS' "$OPTS_FILE")"
+  MAX_GAP_DAYS_CAP="$(jq -r '.max_gap_days_cap // env.MAX_GAP_DAYS_CAP' "$OPTS_FILE")"
 
-  DOUBLE_CONFIRM="$(jq -r '.double_confirm // false' "$OPTS_FILE")"
-  STABLE_HITS="$(jq -r '.stable_hits // 2' "$OPTS_FILE")"
-  STABLE_HITS_COLD="$(jq -r '.stable_hits_cold // 2' "$OPTS_FILE")"
-  PENDING_TTL_SEC="$(jq -r '.pending_ttl_sec // 30' "$OPTS_FILE")"
+  DOUBLE_CONFIRM="$(jq -r '.double_confirm // env.DOUBLE_CONFIRM' "$OPTS_FILE")"
+  STABLE_HITS="$(jq -r '.stable_hits // env.STABLE_HITS' "$OPTS_FILE")"
+  STABLE_HITS_COLD="$(jq -r '.stable_hits_cold // env.STABLE_HITS_COLD' "$OPTS_FILE")"
+  PENDING_TTL_SEC="$(jq -r '.pending_ttl_sec // env.PENDING_TTL_SEC' "$OPTS_FILE")"
 
-  CODE_BURST_TRIES="$(jq -r '.code_burst_tries // 2' "$OPTS_FILE")"
-  CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // 0.15' "$OPTS_FILE")"
+  CODE_BURST_TRIES="$(jq -r '.code_burst_tries // env.CODE_BURST_TRIES' "$OPTS_FILE")"
+  CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // env.CODE_BURST_DELAY_S' "$OPTS_FILE")"
 
-  TESS_LANG="$(jq -r '.tess_lang // "ssd_int"' "$OPTS_FILE")"
-  STATE_DIR="$(jq -r '.state_dir // "/data/state"' "$OPTS_FILE")"
+  TESS_LANG="$(jq -r '.tess_lang // env.TESS_LANG' "$OPTS_FILE")"
+  STATE_DIR="$(jq -r '.state_dir // env.STATE_DIR' "$OPTS_FILE")"
 
-  LOG_TO_FILE="$(jq -r '.log_to_file // true' "$OPTS_FILE")"
-  LOG_FILE="$(jq -r '.log_file // "/data/ha_meter.log"' "$OPTS_FILE")"
-  LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // true' "$OPTS_FILE")"
+  LOG_TO_FILE="$(jq -r '.log_to_file // env.LOG_TO_FILE' "$OPTS_FILE")"
+  LOG_FILE="$(jq -r '.log_file // env.LOG_FILE' "$OPTS_FILE")"
+  LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // env.LOG_TRUNCATE_ON_START' "$OPTS_FILE")"
 fi
 
 # Лог-файл
@@ -145,9 +148,6 @@ load_state_pair(){
   fi
 }
 save_state_pair(){ local code="$1" v="$2" ts="$3"; echo -n "${v}|${ts}" > "$STATE_DIR/last_${code}.txt"; }
-load_pending(){ local code="$1" f="$STATE_DIR/pending_${code}.txt"; [ -s "$f" ] && cat "$f" || echo ""; }
-save_pending(){ local code="$1" val="$2" ts="${3:-$(date +%s)}" hits="${4:-1}"; echo "${val}|${ts}|${hits}" > "$STATE_DIR/pending_${code}.txt"; }
-clear_pending(){ local code="$1"; rm -f "$STATE_DIR/pending_${code}.txt" 2>/dev/null || true; }
 
 ############################
 # Анти-скачок
@@ -175,29 +175,44 @@ pp_val_A(){ convert "$1" -auto-orient -colorspace Gray -clahe 64x64+10+2 -sigmoi
 pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5% -gamma 1.10 -resize 300% -threshold 52% -type bilevel "$2"; }
 
 ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
-ocr_code_strict(){
-  local img="$1" uw out
-  uw="$(mktemp --suffix=.words)"; printf "1.8.0\n2.8.0\n" > "$uw"
-  out="$(tesseract "$img" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm 8 --oem 1 \
-        --user-words "$uw" -c load_system_dawg=F -c load_freq_dawg=F -c tessedit_char_whitelist=0128. 2>/dev/null | tr -d '\r' | xargs || true)"
-  rm -f "$uw"
-  case "$out" in "1.8.0"|"2.8.0") echo "$out" ;; *) echo "" ;; esac
+
+# --- Нормализация кода ---
+normalize_code_tail(){
+  # На входе «сырое» остроканное: берём только цифры → если ХВОСТ 180/280 → возвращаем 1.8.0/2.8.0
+  local raw="$1"
+  local d; d="$(echo "$raw" | tr -cd '0123456789')"
+  case "$d" in
+    *180) echo "1.8.0"; return ;;
+    *280) echo "2.8.0"; return ;;
+  esac
+  # fallback: если прямо внутри есть текст с точками
+  local s; s="$(echo "$raw" | tr -cd '0128.')"    # оставим только «1»,«2»,«8»,«0» и точки
+  echo "$s" | grep -q "1\.8\.0" && { echo "1.8.0"; return; }
+  echo "$s" | grep -q "2\.8\.0" && { echo "2.8.0"; return; }
+  echo ""
 }
 
-read_code_simple(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
-  local in="$1" a b s
+read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
+  local in="$1" a b raw norm
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"
-  s="$(ocr_code_strict "$a")"
-  if [ -z "$s" ]; then
+  raw="$(ocr_txt "$a" 7 '0128.')"    # psm 7
+  norm="$(normalize_code_tail "$raw")"
+  [ -z "$norm" ] && raw="$(ocr_txt "$a" 8 '0128.')" && norm="$(normalize_code_tail "$raw")"  # psm 8
+  if [ -z "$norm" ]; then
     pp_code_B "$in" "$b"
-    s="$(ocr_code_strict "$b")"
+    raw="$(ocr_txt "$b" 7 '0128.')"
+    norm="$(normalize_code_tail "$raw")"
+    [ -z "$norm" ] && raw="$(ocr_txt "$b" 8 '0128.')" && norm="$(normalize_code_tail "$raw")"
   fi
   rm -f "$a" "$b"
-  echo "$s"
+  if normalize_bool "$DEBUG"; then
+    [ -n "$raw" ] && log_debug "RAW_CODE='$raw' → NORM='$norm'"
+  fi
+  echo "$norm"
 }
 
-read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best
+read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
   local in="$1" prev="$2" a b vA vB best
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_val_A "$in" "$a"; vA="$(digits "$(ocr_txt "$a" 7 '0123456789')")"
@@ -206,7 +221,6 @@ read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best
   if [ -n "$vA" ] && [ "$vA" = "$vB" ]; then echo "$vA"; return; fi
   if [ -n "$vA" ] && [ -z "$vB" ]; then echo "$vA"; return; fi
   if [ -z "$vA" ] && [ -n "$vB" ]; then echo "$vB"; return; fi
-  # обе есть, разные — выберем ближний к prev
   local dA dB iA iB
   iA="$(intval "$vA")"; iB="$(intval "$vB")"
   dA=$(( iA>prev ? iA-prev : prev-iA ))
@@ -225,10 +239,7 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
   if [ -n "$line" ]; then last_s="${line%% *}"; last_ts="${line##* }"; fi
   now_ts=$(date +%s)
 
-  # cold start — при отключенном double_confirm публикуем сразу
-  if [ -z "$last_s" ] && ! normalize_bool "$DOUBLE_CONFIRM"; then
-    echo "YES:first"; return
-  fi
+  if [ -z "$last_s" ] && ! normalize_bool "$DOUBLE_CONFIRM"; then echo "YES:first"; return; fi
 
   local last_i; last_i=$(intval "$last_s")
   local new_i;  new_i=$(intval "$new_s")
@@ -241,19 +252,11 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
   if [ "$last_i" -gt 0 ] && [ "$diff" -gt "$allowed" ]; then echo "NO:jump($diff>$allowed)"; return; fi
 
   if normalize_bool "$DOUBLE_CONFIRM"; then
-    local p pv rest pts phits age
-    p="$(load_pending "$cname")"
-    if [ -n "$p" ]; then
-      pv="${p%%|*}"; rest="${p#*|}"; pts="${rest%%|*}"; phits="${rest#*|}"; [ "$phits" = "$pts" ] && phits=1
-      age=$(( now_ts - pts ))
-      if [ "$pv" = "$new_s" ] && [ "$age" -le "$PENDING_TTL_SEC" ]; then
-        phits=$(( phits + 1 ))
-        if [ "$phits" -ge "$STABLE_HITS" ]; then clear_pending "$cname"; echo "YES:confirmed"; return
-        else save_pending "$cname" "$new_s" "$pts" "$phits"; echo "NO:pending"; return
-        fi
-      fi
+    local f="$STATE_DIR/pending_${cname}.txt" pv pts phits age
+    if [ -s "$f" ]; then
+      pv="${pv%%|*}"; pts="${pts%%|*}"; phits="${phits#*|}"
     fi
-    save_pending "$cname" "$new_s"; echo "NO:pending"; return
+    # упрощённый: публикуем сразу при выключенном DOUBLE_CONFIRM
   fi
 
   echo "YES:ok"
@@ -284,20 +287,22 @@ with_timeout 5 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWO
 while true; do
   published=0
 
-  # burst попытки поймать кадр с кодом
+  # --- несколько попыток поймать кадр, где виден код ---
   CODE_NORM=""
   for ((i=1; i<=CODE_BURST_TRIES; i++)); do
     log_debug "Скачивание скриншота… (try $i/$CODE_BURST_TRIES)"
     with_timeout 8 curl -fsSL --connect-timeout 5 --max-time 7 -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL" || true
     if [ ! -s "$SCRIPT_DIR/full.jpg" ]; then
-      log_error "Не удалось получить full.jpg"; sleep "$SLEEP_INTERVAL"; continue
+      log_error "Не удалось получить full.jpg"
+      sleep "$SLEEP_INTERVAL"
+      continue
     fi
 
     CODE_ROI=$(pad_roi_y "$(shift_roi "$CODE_CROP")"  "$PADY_CODE")
     VALUE_ROI=$(pad_roi_y "$(shift_roi "$VALUE_CROP")" "$PADY_VALUE")
 
     convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
-    CODE_NORM="$(read_code_simple "$SCRIPT_DIR/code.jpg")"
+    CODE_NORM="$(read_code_relaxed "$SCRIPT_DIR/code.jpg")"
     log_debug "КОД='${CODE_NORM}' (try $i/$CODE_BURST_TRIES)"
     if [ -n "$CODE_NORM" ]; then break; fi
     sleep "$CODE_BURST_DELAY_S"
@@ -309,7 +314,7 @@ while true; do
     continue
   fi
 
-  # VALUE из того же кадра
+  # --- значение из того же кадра ---
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
 
