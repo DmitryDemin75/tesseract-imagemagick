@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# v0.4.2-relaxed-fix
-# Исправления:
-# - log_debug -> stderr (не ломает командные подстановки)
-# - Код: relaxed-нормализация (хвост 180/280 => 1.8.0/2.8.0)
-# - Value: из того же кадра; обрезка длины по коду (anti-trash), мягкий анти-скачок
-# - Double-confirm выключен (включаем через options при желании)
+# v0.4.3-relaxed-fix2
+# - Исправлено: "unbound variable" при set -u (везде безопасные ${1-}, дефолты и проверки)
+# - Логи отладки -> stderr (не попадают в переменные)
+# - Код нормализуется по "хвосту" (…180/…280 -> 1.8.0/2.8.0)
+# - VALUE из того же кадра, 2 препроцесса, мягкий анти-скачок
+# - Double-confirm по умолчанию выключен
 
 set -Eeuo pipefail
 
@@ -31,7 +31,7 @@ log_error(){ local msg="[ERROR] $*"; echo "$msg" >&2; log_write_file "$msg"; }
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 OPTS_FILE="/data/options.json"
 
-# Дефолты (переопределяются через /data/options.json)
+# Дефолты
 CAMERA_URL="http://127.0.0.1/snap.jpg"
 
 CODE_CROP="64x23+576+361"
@@ -67,7 +67,7 @@ CODE_BURST_DELAY_S=0.15
 TESS_LANG="ssd_int"
 STATE_DIR="$SCRIPT_DIR/state"
 
-# Ограничение длины числа по коду (anti-trash)
+# Ограничения длины для значения (anti-trash)
 VAL_MIN_1_8_0=5
 VAL_MAX_1_8_0=7
 VAL_MIN_2_8_0=3
@@ -77,7 +77,7 @@ LOG_TO_FILE=true
 LOG_FILE="/data/ha_meter.log"
 LOG_TRUNCATE_ON_START=true
 
-# Читаем /data/options.json (если есть)
+# Чтение /data/options.json
 if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   DEBUG="$(jq -r '.debug // true' "$OPTS_FILE")"
 
@@ -123,7 +123,6 @@ if [ -f "$OPTS_FILE" ] && command -v jq >/dev/null 2>&1; then
   LOG_FILE="$(jq -r '.log_file // env.LOG_FILE' "$OPTS_FILE")"
   LOG_TRUNCATE_ON_START="$(jq -r '.log_truncate_on_start // env.LOG_TRUNCATE_ON_START' "$OPTS_FILE")"
 
-  # Необязательные пределы длины значения
   VAL_MIN_1_8_0="$(jq -r '.val_min_1_8_0 // env.VAL_MIN_1_8_0' "$OPTS_FILE")"
   VAL_MAX_1_8_0="$(jq -r '.val_max_1_8_0 // env.VAL_MAX_1_8_0' "$OPTS_FILE")"
   VAL_MIN_2_8_0="$(jq -r '.val_min_2_8_0 // env.VAL_MIN_2_8_0' "$OPTS_FILE")"
@@ -143,19 +142,19 @@ log_debug "Опции: CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=
 ############################
 # Хелперы
 ############################
-parse_roi(){ local r="$1"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
+parse_roi(){ local r="${1-}"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
 fmt_roi(){ echo "${1}x${2}+${3}+${4}"; }
-shift_roi(){ read -r W H X Y < <(parse_roi "$1"); fmt_roi "$W" "$H" "$((X+DX))" "$((Y+DY))"; }
-pad_roi_y(){ local roi="$1" pad="$2"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
-intval(){ echo "${1:-0}" | awk '{if($0=="") print 0; else print int($0+0)}'; }
-digits(){ echo "$1" | tr -cd '0-9'; }
-lstrip_zeros(){ local s="${1:-}"; s="$(echo -n "$s" | sed 's/^0\+//')"; [ -z "$s" ] && echo 0 || echo "$s"; }
+shift_roi(){ read -r W H X Y < <(parse_roi "${1-0x0+0+0}"); fmt_roi "$W" "$H" "$((X+DX))" "$((Y+DY))"; }
+pad_roi_y(){ local roi="${1-0x0+0+0}" pad="${2-0}"; read -r W H X Y < <(parse_roi "$roi"); fmt_roi "$W" "$((H+2*pad))" "$X" "$((Y-pad))"; }
+intval(){ echo "${1-0}" | awk '{if($0=="") print 0; else print int($0+0)}'; }
+digits(){ echo "${1-}" | tr -cd '0-9'; }
+lstrip_zeros(){ local s="${1-}"; s="$(echo -n "$s" | sed 's/^0\+//')"; [ -z "$s" ] && echo 0 || echo "$s"; }
 
 TIMEOUT_BIN="$(command -v timeout || true)"
-with_timeout(){ local sec="$1"; shift; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
+with_timeout(){ local sec="${1-}"; shift || true; if [ -n "$TIMEOUT_BIN" ]; then $TIMEOUT_BIN "$sec" "$@"; else "$@"; fi }
 
 load_state_pair(){
-  local code="$1" f="$STATE_DIR/last_${code}.txt"
+  local _code="${1-}" f="$STATE_DIR/last_${_code}.txt"
   if [ -s "$f" ]; then
     local line; line="$(cat "$f")"
     if echo "$line" | grep -q '|'; then echo "${line%%|*} ${line##*|}"; else echo "$line $(stat -c %Y "$f" 2>/dev/null || date +%s)"; fi
@@ -163,18 +162,18 @@ load_state_pair(){
     echo ""
   fi
 }
-save_state_pair(){ local code="$1" v="$2" ts="$3"; echo -n "${v}|${ts}" > "$STATE_DIR/last_${code}.txt"; }
+save_state_pair(){ local _code="${1-}" v="${2-}" ts="${3-}"; echo -n "${v}|${ts}" > "$STATE_DIR/last_${_code}.txt"; }
 
 ############################
 # Анти-скачок
 ############################
 allowed_jump_units(){ # $1=code $2=dt_sec
-  local code="$1" dt="${2:-1}"
-  [ "$dt" -lt 1 ] && dt=1
+  local _code="${1-1.8.0}" _dt="${2-1}"
+  [ "${_dt:-0}" -lt 1 ] && _dt=1
   local dt_cap=$(( MAX_GAP_DAYS_CAP * 86400 ))
-  [ "$dt" -gt "$dt_cap" ] && dt="$dt_cap"
-  local kwh_day; if [ "$code" = "1.8.0" ]; then kwh_day="$DAILY_MAX_KWH_1_8_0"; else kwh_day="$DAILY_MAX_KWH_2_8_0"; fi
-  awk -v dt="$dt" -v kwh="$kwh_day" -v burst="$BURST_MULT" -v dec="$VALUE_DECIMALS" -v min="$MIN_STEP_UNITS" 'BEGIN{
+  [ "${_dt:-0}" -gt "$dt_cap" ] && _dt="$dt_cap"
+  local kwh_day; if [ "$_code" = "1.8.0" ]; then kwh_day="$DAILY_MAX_KWH_1_8_0"; else kwh_day="$DAILY_MAX_KWH_2_8_0"; fi
+  awk -v dt="$_dt" -v kwh="$kwh_day" -v burst="$BURST_MULT" -v dec="$VALUE_DECIMALS" -v min="$MIN_STEP_UNITS" 'BEGIN{
     s=1; for(i=0;i<dec;i++) s*=10;
     v=kwh*(dt/86400.0)*s*burst; if(v<min) v=min;
     printf("%.0f\n", v);
@@ -190,18 +189,16 @@ pp_code_B(){ convert "$1" -auto-orient -colorspace Gray -resize 320% -adaptive-t
 pp_val_A(){ convert "$1" -auto-orient -colorspace Gray -clahe 64x64+10+2 -sigmoidal-contrast 6x50% -resize 300% -adaptive-threshold 41x41+8% -type bilevel "$2" 2>/dev/null || cp "$1" "$2"; }
 pp_val_B(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.5%x0.5% -gamma 1.10 -resize 300% -threshold 52% -type bilevel "$2"; }
 
-ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
+ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "${2-7}" --oem 1 -c tessedit_char_whitelist="${3-0123456789}" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
 
 # Нормализация распознанного кода
 normalize_code_tail(){
-  local raw="$1"
-  # оставим только цифры
+  local raw="${1-}"
   local d; d="$(echo "$raw" | tr -cd '0123456789')"
   case "$d" in
     *180) echo "1.8.0"; return ;;
     *280) echo "2.8.0"; return ;;
   esac
-  # fallback по символам "1.8.0"/"2.8.0"
   local s; s="$(echo "$raw" | tr -cd '0128.')"    # только 1,2,8,0 и точки
   echo "$s" | grep -q "1\.8\.0" && { echo "1.8.0"; return; }
   echo "$s" | grep -q "2\.8\.0" && { echo "2.8.0"; return; }
@@ -209,28 +206,26 @@ normalize_code_tail(){
 }
 
 read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
-  local in="$1" a b raw norm
+  local in="${1-}" a b raw="" norm=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"
-  raw="$(ocr_txt "$a" 7 '0128.')"
+  raw="$(ocr_txt "$a" 7 '0128.')" || true
   norm="$(normalize_code_tail "$raw")"
   if [ -z "$norm" ]; then
-    raw="$(ocr_txt "$a" 8 '0128.')"
+    raw="$(ocr_txt "$a" 8 '0128.')" || true
     norm="$(normalize_code_tail "$raw")"
   fi
   if [ -z "$norm" ]; then
     pp_code_B "$in" "$b"
-    raw="$(ocr_txt "$b" 7 '0128.')"
+    raw="$(ocr_txt "$b" 7 '0128.')" || true
     norm="$(normalize_code_tail "$raw")"
     if [ -z "$norm" ]; then
-      raw="$(ocr_txt "$b" 8 '0128.')"
+      raw="$(ocr_txt "$b" 8 '0128.')" || true
       norm="$(normalize_code_tail "$raw")"
     fi
   fi
   rm -f "$a" "$b"
-  # лог — только в stderr (не попадёт в $())
   if normalize_bool "$DEBUG"; then
-    # убираем переводы строк в raw для читабельности
     local raw1; raw1="$(echo -n "$raw" | tr '\n' ' ' | tr -d '\r')"
     log_debug "RAW_CODE='${raw1}' -> NORM='${norm}'"
   fi
@@ -238,7 +233,7 @@ read_code_relaxed(){ # $1=code.jpg -> echo "1.8.0|2.8.0|"
 }
 
 read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
-  local in="$1" prev="$2" a b vA vB best
+  local in="${1-}" prev="${2-0}" a b vA="" vB="" best=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"
   pp_val_A "$in" "$a"; vA="$(digits "$(ocr_txt "$a" 7 '0123456789')")"
   pp_val_B "$in" "$b"; vB="$(digits "$(ocr_txt "$b" 7 '0123456789')")"
@@ -256,10 +251,10 @@ read_value_simple(){ # $1=value.jpg $2=prev_int -> echo best_digits
 
 # Обрезка длины значения под конкретный код
 clamp_digits_for_code(){
-  local code="$1" s="$2" min max len
-  if [ "$code" = "1.8.0" ]; then min="$VAL_MIN_1_8_0"; max="$VAL_MAX_1_8_0"; else min="$VAL_MIN_2_8_0"; max="$VAL_MAX_2_8_0"; fi
+  local _code="${1-1.8.0}" s="${2-}" min max len
+  if [ "$_code" = "1.8.0" ]; then min="$VAL_MIN_1_8_0"; max="$VAL_MAX_1_8_0"; else min="$VAL_MIN_2_8_0"; max="$VAL_MAX_2_8_0"; fi
   len=${#s}
-  if [ "$len" -gt "$max" ]; then s="${s: -$max}"; fi        # берём правые max цифр (шум — слева)
+  if [ "$len" -gt "$max" ]; then s="${s: -$max}"; fi        # берём правые max цифр
   len=${#s}
   if [ "$len" -lt "$min" ]; then echo ""; return; fi
   echo "$s"
@@ -269,10 +264,11 @@ clamp_digits_for_code(){
 # Принятие/публикация
 ############################
 should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
-  local code="$1" new_s="$2"
-  [ -z "$new_s" ] && { echo "NO:empty"; return; }
-  local len=${#new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; fi
-  local cname; cname="$(echo "$code" | tr . _ )"
+  local _code="${1-}" _new_s="${2-}"
+  [ -z "$_code" ] && { echo "NO:nocode"; return; }
+  [ -z "$_new_s" ] && { echo "NO:empty"; return; }
+  local len=${#_new_s}; if [ "$len" -lt 3 ] || [ "$len" -gt 9 ]; then echo "NO:len"; return; fi
+  local cname; cname="$(echo "$_code" | tr . _ )"
   local line last_s="" last_ts=0 now_ts
   line="$(load_state_pair "$cname")"
   if [ -n "$line" ]; then last_s="${line%% *}"; last_ts="${line##* }"; fi
@@ -281,12 +277,12 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
   if [ -z "$last_s" ] && ! normalize_bool "$DOUBLE_CONFIRM"; then echo "YES:first"; return; fi
 
   local last_i; last_i=$(intval "$last_s")
-  local new_i;  new_i=$(intval "$new_s")
+  local new_i;  new_i=$(intval "$_new_s")
 
   if [ "$last_i" -gt 0 ] && [ "$new_i" -lt "$last_i" ]; then echo "NO:monotonic"; return; fi
 
   local dt=$(( now_ts - last_ts )); [ "$dt" -lt 1 ] && dt=1
-  local allowed; allowed="$(allowed_jump_units "$code" "$dt")"
+  local allowed; allowed="$(allowed_jump_units "$_code" "$dt")"
   local diff=$(( new_i - last_i ))
   if [ "$last_i" -gt 0 ] && [ "$diff" -gt "$allowed" ]; then echo "NO:jump($diff>$allowed)"; return; fi
 
@@ -294,13 +290,13 @@ should_accept_value(){ # $1=code $2=new_s (digits) -> YES|NO:*
 }
 
 publish_value(){
-  local code="$1" value="$2" topic payload ts
+  local _code="${1-1.8.0}" _value="${2-0}" topic payload ts
   ts=$(date --iso-8601=seconds)
-  payload=$(printf '{"code":"%s","value":"%s","timestamp":"%s"}' "$code" "$value" "$ts")
-  if [ "$code" = "1.8.0" ]; then topic="$MQTT_TOPIC_1"; else topic="$MQTT_TOPIC_2"; fi
-  log_debug "MQTT $code: $payload"
+  payload=$(printf '{"code":"%s","value":"%s","timestamp":"%s"}' "$_code" "$_value" "$ts")
+  if [ "$_code" = "1.8.0" ]; then topic="$MQTT_TOPIC_1"; else topic="$MQTT_TOPIC_2"; fi
+  log_debug "MQTT $_code: $payload"
   with_timeout 5 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$topic" -m "$payload" || log_error "mqtt publish failed"
-  save_state_pair "$(echo "$code" | tr . _ )" "$value" "$(date +%s)"
+  save_state_pair "$(echo "$_code" | tr . _ )" "$_value" "$(date +%s)"
 }
 
 ############################
@@ -366,6 +362,7 @@ while true; do
     NO:jump*)    log_debug "DROP $CODE_NORM: анти-скачок ($verdict)" ;;
     NO:monotonic)log_debug "DROP $CODE_NORM: нарушена монотонность" ;;
     NO:len)      log_debug "DROP $CODE_NORM: неподходящая длина" ;;
+    NO:nocode)   log_debug "DROP: пустой код" ;;
     NO:empty|NO:*)log_debug "DROP $CODE_NORM: пусто/мусор" ;;
   esac
 
