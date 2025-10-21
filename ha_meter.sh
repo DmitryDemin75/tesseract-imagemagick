@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# ha_meter.sh — OCR 7-seg + улучшенный код (strict + adaptive) + double-confirm по VALUE + анти-скачок
-# Код (1.8.0/2.8.0) теперь не «гейтится» по умолчанию (code_gate_enabled=false),
-# чтобы не терять кадры; при желании можно включить обратно в UI.
+# ha_meter.sh — OCR 7-seg + burst-съёмка кода + строгий код + double-confirm по VALUE + анти-скачок
+# VALUE всегда читается из того же кадра, где распознан код.
 
 ###############################################################################
 # Отладка/логирование
@@ -16,21 +15,9 @@ normalize_bool() {
 }
 LOG_TO_FILE=false
 LOG_FILE=""
-log_write_file(){
-  if normalize_bool "$LOG_TO_FILE"; then
-    [ -n "$LOG_FILE" ] && echo "$1" >> "$LOG_FILE"
-  fi
-}
-log_debug(){
-  local msg="[DEBUG] $*"
-  normalize_bool "$DEBUG" && echo "$msg"
-  log_write_file "$msg"
-}
-log_error(){
-  local msg="[ERROR] $*"
-  echo "$msg" >&2
-  log_write_file "$msg"
-}
+log_write_file(){ if normalize_bool "$LOG_TO_FILE"; then [ -n "$LOG_FILE" ] && echo "$1" >> "$LOG_FILE"; fi; }
+log_debug(){ local msg="[DEBUG] $*"; normalize_bool "$DEBUG" && echo "$msg"; log_write_file "$msg"; }
+log_error(){ local msg="[ERROR] $*"; echo "$msg" >&2; log_write_file "$msg"; }
 
 ###############################################################################
 # Чтение опций
@@ -77,6 +64,9 @@ if command -v jq >/dev/null 2>&1 && [ -f "$OPTS_FILE" ]; then
   CODE_STABLE_HITS="$(jq -r '.code_stable_hits // 2' "$OPTS_FILE")"
   CODE_PENDING_TTL_SEC="$(jq -r '.code_pending_ttl_sec // 5' "$OPTS_FILE")"
 
+  CODE_BURST_TRIES="$(jq -r '.code_burst_tries // 3' "$OPTS_FILE")"
+  CODE_BURST_DELAY_S="$(jq -r '.code_burst_delay_s // 0.15' "$OPTS_FILE")"
+
   TESS_LANG="$(jq -r '.tess_lang // "ssd_int"' "$OPTS_FILE")"
   STATE_DIR="$(jq -r '.state_dir // "/data/state"' "$OPTS_FILE")"
 
@@ -117,6 +107,9 @@ else
   CODE_STABLE_HITS=2
   CODE_PENDING_TTL_SEC=5
 
+  CODE_BURST_TRIES=3
+  CODE_BURST_DELAY_S=0.15
+
   TESS_LANG="ssd_int"
   STATE_DIR="$SCRIPT_DIR/state"
 
@@ -128,24 +121,17 @@ else
   LOG_TRUNCATE_ON_START=true
 fi
 
-# Нормализуем DEBUG в 1/0
+# Нормализуем DEBUG в 1/0 и готовим лог
 normalize_bool "$DEBUG" && DEBUG=1 || DEBUG=0
-
-# Файловый лог
 if normalize_bool "$LOG_TO_FILE"; then
   mkdir -p "$(dirname "$LOG_FILE")"
-  if normalize_bool "$LOG_TRUNCATE_ON_START"; then
-    : > "$LOG_FILE"
-    echo "[DEBUG] Локальный лог очищен: $LOG_FILE" >> "$LOG_FILE"
-  else
-    touch "$LOG_FILE"
-  fi
+  if normalize_bool "$LOG_TRUNCATE_ON_START"; then : > "$LOG_FILE"; echo "[DEBUG] Локальный лог очищен: $LOG_FILE" >> "$LOG_FILE"; else touch "$LOG_FILE"; fi
 fi
 
 log_debug "Опции загружены. CAMERA_URL=$CAMERA_URL, CODE_CROP=$CODE_CROP, VALUE_CROP=$VALUE_CROP, DX/DY=${DX}/${DY}, DEBUG=$DEBUG"
 
 ###############################################################################
-# Утилиты/таймауты
+# Утилиты/таймауты/ROI
 ###############################################################################
 parse_roi(){ local r="$1"; local W=${r%%x*}; local rest=${r#*x}; local H=${rest%%+*}; local t=${r#*+}; local X=${t%%+*}; local Y=${r##*+}; echo "$W $H $X $Y"; }
 fmt_roi(){ echo "${1}x${2}+${3}+${4}"; }
@@ -233,15 +219,14 @@ pp_val_C(){ convert "$1" -colorspace Gray -auto-level -contrast-stretch 0.3%x0.3
 ###############################################################################
 # OCR
 ###############################################################################
-ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 \
-  -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
+ocr_txt(){ tesseract "$1" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm "$2" --oem 1 -c tessedit_char_whitelist="$3" -c classify_bln_numeric_mode=1 2>/dev/null | tr -d '\r'; }
 clean_code(){  echo "$1" | tr -cd '0128.\n' | xargs; }
 clean_value(){ echo "$1" | tr -cd '0-9\n'   | xargs; }
 
 norm_code(){
   local raw="$1"; local s="$(clean_code "$raw")"; s="$(echo "$s" | sed 's/\.\././g')"
   local d1="$(lev "$s" "1.8.0")"; local d2="$(lev "$s" "2.8.0")"
-  local thr=1
+  local thr=2
   if [ "$d1" -le "$thr" ] || [ "$d2" -le "$thr" ]; then
     [ "$d1" -le "$d2" ] && echo "1.8.0" || echo "2.8.0"
   else
@@ -253,14 +238,9 @@ ocr_code_strict(){
   local img="$1" uw out
   uw="$(mktemp --suffix=.words)"; printf "1.8.0\n2.8.0\n" > "$uw"
   out="$(tesseract "$img" stdout -l "$TESS_LANG" --tessdata-dir "$SCRIPT_DIR" --psm 8 --oem 1 \
-        --user-words "$uw" \
-        -c load_system_dawg=F -c load_freq_dawg=F \
-        -c tessedit_char_whitelist=0128. 2>/dev/null | tr -d '\r' | xargs || true)"
+        --user-words "$uw" -c load_system_dawg=F -c load_freq_dawg=F -c tessedit_char_whitelist=0128. 2>/dev/null | tr -d '\r' | xargs || true)"
   rm -f "$uw"
-  case "$out" in
-    "1.8.0"|"2.8.0") echo "$out" ;;
-    *) echo "" ;;
-  esac
+  case "$out" in "1.8.0"|"2.8.0") echo "$out" ;; *) echo "" ;; esac
 }
 
 read_code_best(){
@@ -272,22 +252,23 @@ read_code_best(){
     local s; s="$(ocr_code_strict "$t")"
     rm -f "$t"
     [ -n "$s" ] && { echo "$s"; return; }
-    # adaptive вариант
     t="$(mktemp --suffix=.png)"
     pp_code_D "$in" "$t"
     s="$(ocr_code_strict "$t")"
     rm -f "$t"
     [ -n "$s" ] && { echo "$s"; return; }
   fi
-  # fallback: 4 ветки, psm=8 и, если пусто, psm=7
+  # fallback: 4 ветки, psm=8 → при пустоте psm=7
   local a b c d tA tB tC tD nA nB nC nD out=""
   a="$(mktemp --suffix=.png)"; b="$(mktemp --suffix=.png)"; c="$(mktemp --suffix=.png)"; d="$(mktemp --suffix=.png)"
   pp_code_A "$in" "$a"; pp_code_B "$in" "$b"; pp_code_C "$in" "$c"; pp_code_D "$in" "$d"
   tA="$(ocr_txt "$a" 8 '0128.')"; tB="$(ocr_txt "$b" 8 '0128.')"; tC="$(ocr_txt "$c" 8 '0128.')"; tD="$(ocr_txt "$d" 8 '0128.')"
   nA="$(norm_code "$tA")"; nB="$(norm_code "$tB")"; nC="$(norm_code "$tC")"; nD="$(norm_code "$tD")"
-  [ -z "$nA$nB$nC$nD" ] && { tA="$(ocr_txt "$a" 7 '0128.')"; tB="$(ocr_txt "$b" 7 '0128.')"; tC="$(ocr_txt "$c" 7 '0128.')"; tD="$(ocr_txt "$d" 7 '0128.')"; nA="$(norm_code "$tA")"; nB="$(norm_code "$tB")"; nC="$(norm_code "$tC")"; nD="$(norm_code "$tD")"; }
+  if [ -z "$nA$nB$nC$nD" ]; then
+    tA="$(ocr_txt "$a" 7 '0128.')"; tB="$(ocr_txt "$b" 7 '0128.')"; tC="$(ocr_txt "$c" 7 '0128.')"; tD="$(ocr_txt "$d" 7 '0128.')"
+    nA="$(norm_code "$tA")"; nB="$(norm_code "$tB")"; nC="$(norm_code "$tC")"; nD="$(norm_code "$tD")"
+  fi
   rm -f "$a" "$b" "$c" "$d"
-  # требуем согласие 2+ совпадений
   for candidate in "1.8.0" "2.8.0"; do
     local cnt=0
     [ "$nA" = "$candidate" ] && cnt=$((cnt+1))
@@ -329,7 +310,7 @@ allowed_jump_units(){ # $1=code $2=dt_sec
   [ "$dt" -lt 1 ] && dt=1
   local dt_cap=$(( MAX_GAP_DAYS_CAP * 86400 ))
   [ "$dt" -gt "$dt_cap" ] && dt="$dt_cap"
-  local kwh_day; if [ "$code" = "1.8.0" ]; then kwh_day="$DAILY_MAX_KWH_1_8_0"; else kwh_day="$DAILY_MAX_KWH_2_8_0"; fi
+  local kwh_day; if [ "$code" = "1.8.0" ] then kwh_day="$DAILY_MAX_KWH_1_8_0"; else kwh_day="$DAILY_MAX_KWH_2_8_0"; fi
   local allowed
   allowed="$(awk -v dt="$dt" -v kwh="$kwh_day" -v burst="$BURST_MULT" -v dec="$VALUE_DECIMALS" 'BEGIN{ s=1; for(i=0;i<dec;i++) s*=10; v=kwh*(dt/86400.0)*s*burst; if(v<1)v=1; printf("%.0f",v); }')"
   [ "$allowed" -lt "$MIN_STEP_UNITS" ] && echo "$MIN_STEP_UNITS" || echo "$allowed"
@@ -346,7 +327,7 @@ publish_value(){
 }
 
 ###############################################################################
-# should_accept() — VALUE; should_accept_code() — по желанию (гейтинг)
+# should_accept() — VALUE; should_accept_code() — опционально
 ###############################################################################
 should_accept(){
   local code="$1" new_s="$2"
@@ -443,38 +424,52 @@ with_timeout 5 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWO
 # Основной цикл
 ###############################################################################
 while true; do
-  log_debug "Скачивание скриншота…"
-  ts_cycle="$(date +%s)"
-  with_timeout 8 curl -fsSL --connect-timeout 5 --max-time 7 -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL"
-  if [ $? -ne 0 ] || [ ! -s "$SCRIPT_DIR/full.jpg" ]; then
-    log_error "Не удалось получить full.jpg"
+  published=0
+  CODE_NORM=""
+  DPI=72
+
+  # ------ BURST: несколько быстрых попыток поймать кадр с кодом ------
+  for ((i=1; i<=CODE_BURST_TRIES; i++)); do
+    log_debug "Скачивание скриншота… (try $i/$CODE_BURST_TRIES)"
+    with_timeout 8 curl -fsSL --connect-timeout 5 --max-time 7 -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL" || true
+    if [ ! -s "$SCRIPT_DIR/full.jpg" ]; then
+      log_error "Не удалось получить full.jpg"
+      sleep "$SLEEP_INTERVAL"
+      continue
+    fi
+
+    RAW_DPI=$(identify -format "%x" "$SCRIPT_DIR/full.jpg" 2>/dev/null || echo "")
+    DPI=$(echo "$RAW_DPI" | sed 's/[^0-9.]//g'); [ -z "$DPI" ] && DPI=72
+    log_debug "DPI: $DPI"
+
+    CODE_ROI=$(pad_roi_y "$(shift_roi "$CODE_CROP")"  "$PADY_CODE")
+    VALUE_ROI=$(pad_roi_y "$(shift_roi "$VALUE_CROP")" "$PADY_VALUE")
+
+    # КОД
+    log_debug "Обрезка CODE: $CODE_ROI"
+    convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; break; }
+    [ "$(normalize_bool "$CALIBRATE_DUMP"; echo $?)" -eq 0 ] && mkdir -p "$DUMP_DIR" && cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/code_try${i}.jpg"
+
+    CODE_NORM="$(read_code_best "$SCRIPT_DIR/code.jpg")"
+    log_debug "КОД(best)='${CODE_NORM}' (try $i/$CODE_BURST_TRIES)"
+
+    if [ -n "$CODE_NORM" ]; then
+      # поймали кадр с кодом — на нём же потом считаем VALUE
+      break
+    fi
+
+    # если не поймали — небольшая задержка и пробуем ещё
+    sleep "$CODE_BURST_DELAY_S"
+  done
+
+  # если не распознали код ни в одной попытке — пропускаем цикл
+  if [ -z "$CODE_NORM" ]; then
+    log_debug "DROP CODE: пусто"
     sleep "$SLEEP_INTERVAL"
     continue
   fi
 
-  if normalize_bool "$CALIBRATE_DUMP"; then
-    mkdir -p "$DUMP_DIR/$ts_cycle"
-    cp "$SCRIPT_DIR/full.jpg" "$DUMP_DIR/$ts_cycle/full.jpg"
-  fi
-
-  RAW_DPI=$(identify -format "%x" "$SCRIPT_DIR/full.jpg" 2>/dev/null || echo "")
-  DPI=$(echo "$RAW_DPI" | sed 's/[^0-9.]//g'); [ -z "$DPI" ] && DPI=72
-  log_debug "DPI: $DPI"
-
-  CODE_ROI=$(pad_roi_y "$(shift_roi "$CODE_CROP")"  "$PADY_CODE")
-  VALUE_ROI=$(pad_roi_y "$(shift_roi "$VALUE_CROP")" "$PADY_VALUE")
-
-  # --- КОД ---
-  log_debug "Обрезка CODE: $CODE_ROI"
-  convert "$SCRIPT_DIR/full.jpg" -crop "$CODE_ROI" +repage "$SCRIPT_DIR/code.jpg" || { log_error "КРОП code"; sleep "$SLEEP_INTERVAL"; continue; }
-  if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/code.jpg" "$DUMP_DIR/$ts_cycle/code.jpg"; fi
-
-  CODE_NORM="$(read_code_best "$SCRIPT_DIR/code.jpg")"
-  log_debug "КОД(best)='${CODE_NORM}'"
-
-  published=0
-
-  # Гейтинг по коду — опционально
+  # Опциональный гейтинг по коду
   if normalize_bool "$CODE_GATE_ENABLED"; then
     cv="$(should_accept_code "$CODE_NORM")"
     case "$cv" in
@@ -482,17 +477,12 @@ while true; do
       NO:pending*) log_debug "HOLD CODE: ждём подтверждение кода ($cv)"; sleep "$SLEEP_INTERVAL"; continue ;;
       NO:empty|NO:*) log_debug "DROP CODE: код ненадёжен ($cv)"; sleep "$SLEEP_INTERVAL"; continue ;;
     esac
-  else
-    # без гейтинга — просто скипаем пустой код
-    if [ -z "$CODE_NORM" ]; then
-      log_debug "DROP CODE: пусто"; sleep "$SLEEP_INTERVAL"; continue
-    fi
   fi
 
-  # --- ЗНАЧЕНИЕ (тот же кадр) ---
+  # ЗНАЧЕНИЕ — из того же full.jpg
   log_debug "Код принят ($CODE_NORM). Обрезка VALUE: $VALUE_ROI"
   convert "$SCRIPT_DIR/full.jpg" -crop "$VALUE_ROI" +repage "$SCRIPT_DIR/value.jpg" || { log_error "КРОП value"; sleep "$SLEEP_INTERVAL"; continue; }
-  if normalize_bool "$CALIBRATE_DUMP"; then cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/$ts_cycle/value.jpg"; fi
+  [ "$(normalize_bool "$CALIBRATE_DUMP"; echo $?)" -eq 0 ] && cp "$SCRIPT_DIR/value.jpg" "$DUMP_DIR/value_last.jpg"
 
   st_pair="$(load_state_pair "$(echo "$CODE_NORM" | tr . _ )")"
   prev_int=0; if [ -n "$st_pair" ]; then prev_int="$(intval "${st_pair%% *}")"; fi
