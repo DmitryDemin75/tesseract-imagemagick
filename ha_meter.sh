@@ -88,7 +88,7 @@ fi
 # Основной цикл
 ###############################################################################
 while true; do
-  log_debug "Скачивание скриншота..."
+  #log_debug "Скачивание скриншота..."
   curl -s -o "$SCRIPT_DIR/full.jpg" "$CAMERA_URL"
   if [ $? -ne 0 ]; then
     log_error "Ошибка скачивания скриншота с камеры."
@@ -108,9 +108,9 @@ while true; do
   if [ -z "$DPI" ] || [ "$DPI" = "0" ]; then
     DPI=300
   fi
-  log_debug "Используем разрешение: ${DPI} dpi"
+  #log_debug "Используем разрешение: ${DPI} dpi"
 
-  log_debug "Обрезка области с кодом..."
+  #log_debug "Обрезка области с кодом..."
   # Добавляем параметры -density и -units PixelsPerInch для корректной обработки изображения
   convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
   #magick $SCRIPT_DIR/full.jpg -crop $CODE_CROP +repage "$SCRIPT_DIR/code.jpg"
