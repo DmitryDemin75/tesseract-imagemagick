@@ -1,6 +1,6 @@
 {
   "name": "Tesseract and ImageMagick Seven segments displays OCR",
-  "version": "0.4.5-simple",
+  "version": "0.4.6-simple",
   "slug": "tesseract_imagemagick",
   "description": "Simple, robust OCR for 7-seg meters (strict code, same-frame value, anti-jump)",
   "arch": ["armv7", "armhf", "aarch64", "amd64", "i386"],
