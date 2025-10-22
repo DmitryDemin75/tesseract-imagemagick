@@ -138,7 +138,7 @@ while true; do
 
   # Обрабатываем только коды 1.8.0 и 2.8.0
   if [ "$code" = "1.8.0" ] || [ "$code" = "2.8.0" ]; then
-    log_debug "Код '$code' соответствует интересующему. Обрезка области со значением..."
+    #log_debug "Код '$code' соответствует интересующему. Обрезка области со значением..."
     convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop $VALUE_CROP +repage "$SCRIPT_DIR/value.jpg"
     #magick $SCRIPT_DIR/full.jpg -crop $VALUE_CROP +repage "$SCRIPT_DIR/code.jpg"
     if [ $? -ne 0 ]; then
@@ -201,6 +201,7 @@ fi
     sleep $SLEEP_INTERVAL
   elif [ $published -eq 2 ]; then
     # Если опубликован код 2.8.0, делаем дополнительную паузу
+    log_debug "Ожидаем '$EXTRA_PAUSE'сек и идем дальше..."
     sleep $EXTRA_PAUSE
   fi
 
