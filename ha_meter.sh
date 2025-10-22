@@ -187,14 +187,14 @@ while true; do
       fi
       published=1
     fi
-    elif [ "$code" = "132.8.0" ]; then
-    published=2
-    fi
   else
     #log_debug "Распознанный код '$code' не соответствует интересующим (1.8.0 или 2.8.0)."
     log_debug ""
   fi
-
+  # Если код = 132.8.0 то значит можно подождать $EXTRA_PAUSE 
+if [ "$code" = "132.8.0" ]; then
+    published=2
+fi    
   # Логика задержек
   if [ $published -eq 0 ]; then
     # Если публикация не производилась, ждём стандартное время
