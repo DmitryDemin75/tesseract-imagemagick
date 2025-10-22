@@ -185,7 +185,7 @@ while true; do
       if [ $? -ne 0 ]; then
         log_error "Ошибка публикации данных для 2.8.0."
       fi
-      published=2
+      published=1
     fi
   else
     #log_debug "Распознанный код '$code' не соответствует интересующим (1.8.0 или 2.8.0)."
