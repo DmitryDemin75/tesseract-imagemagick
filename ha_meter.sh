@@ -1,12 +1,13 @@
 #!/bin/bash
 # ha_meter.sh
-# Добавлено: публикация ЕДИНОГО ROI (code+value) через MQTT Image Discovery при DEBUG=true.
+# Публикация:
+# - ROI combined (code+value) для ОТЛАДКИ (DEBUG=true) — старая сущность
+# - ДВЕ новые ROI: отдельные для 1.8.0 и 2.8.0 (всегда)
 
 ###############################################################################
 # Логирование
 ###############################################################################
 DEBUG=1
-
 log_debug() { if [ "$DEBUG" -eq 1 ]; then echo "[DEBUG] $*"; fi; }
 log_error() { echo "[ERROR] $*" >&2; }
 
@@ -33,9 +34,15 @@ EXTRA_PAUSE=100
 CODE_CROP="64x23+576+361"
 VALUE_CROP="134x30+670+353"
 
-# ОДИН топик/сущность для комбинированного изображения ROI
+# Старая отладочная картинка (combined) — как раньше
 IMG_DISC_COMBINED="homeassistant/image/energy_meter_roi_combined/config"
 IMG_TOPIC_COMBINED="homeassistant/energy_meter/roi/combined"  # бинарный JPEG
+
+# НОВЫЕ картинка для 1.8.0 и 2.8.0 — ВСЕГДА публикуются
+IMG_DISC_1_8_0="homeassistant/image/energy_meter_roi_1_8_0/config"
+IMG_DISC_2_8_0="homeassistant/image/energy_meter_roi_2_8_0/config"
+IMG_TOPIC_1_8_0="homeassistant/energy_meter/roi/1_8_0"
+IMG_TOPIC_2_8_0="homeassistant/energy_meter/roi/2_8_0"
 
 ###############################################################################
 # Загрузка опций из UI аддона
@@ -88,13 +95,21 @@ mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$MQTT_C
 mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$MQTT_CONFIG_TOPIC_2" -m "$config_payload_2" || log_error "Ошибка публикации конфигурации 2.8.0"
 
 ###############################################################################
-# MQTT Discovery: ЕДИНОЕ изображение ROI (включается при DEBUG=true)
+# MQTT Discovery: изображения
+# - Старая combined (только при DEBUG=true)
+# - НОВЫЕ roi_1_8_0 и roi_2_8_0 (всегда)
 ###############################################################################
 if [ "$DEBUG" -eq 1 ]; then
   img_conf_combined='{"name":"Energy Meter ROI (code+value)","unique_id":"energy_meter_roi_combined","image_topic":"'"$IMG_TOPIC_COMBINED"'","content_type":"image/jpeg"}'
-  mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_DISC_COMBINED" -m "$img_conf_combined" || log_error "Ошибка публикации discovery ROI combined"
+  mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_DISC_COMBINED" -m "$img_conf_combined" || log_error "Ошибка discovery ROI combined"
   log_debug "ROI (combined) discovery опубликован (DEBUG=true)."
 fi
+
+# Новые — публикуем всегда
+img_conf_1_8_0='{"name":"Energy Meter ROI 1.8.0 (code+value)","unique_id":"energy_meter_roi_1_8_0","image_topic":"'"$IMG_TOPIC_1_8_0"'","content_type":"image/jpeg"}'
+img_conf_2_8_0='{"name":"Energy Meter ROI 2.8.0 (code+value)","unique_id":"energy_meter_roi_2_8_0","image_topic":"'"$IMG_TOPIC_2_8_0"'","content_type":"image/jpeg"}'
+mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_DISC_1_8_0" -m "$img_conf_1_8_0" || log_error "Ошибка discovery ROI 1.8.0"
+mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_DISC_2_8_0" -m "$img_conf_2_8_0" || log_error "Ошибка discovery ROI 2.8.0"
 
 ###############################################################################
 # Основной цикл
@@ -130,14 +145,22 @@ while true; do
     # VALUE: кроп
     convert -density "$DPI" -units PixelsPerInch "$SCRIPT_DIR/full.jpg" -crop "$VALUE_CROP" +repage "$SCRIPT_DIR/value.jpg" || { log_error "Ошибка кропа VALUE"; sleep "$SLEEP_INTERVAL"; continue; }
 
-    # Публикуем ОДНУ комбинированную картинку (если DEBUG)
+    # Комбинированное изображение (code | value)
+    convert "$SCRIPT_DIR/code.jpg" "$SCRIPT_DIR/value.jpg" +append "$SCRIPT_DIR/roi_combined.jpg" || cp "$SCRIPT_DIR/code.jpg" "$SCRIPT_DIR/roi_combined.jpg"
+
+    # Публикация НОВЫХ пер-кода картинок — ВСЕГДА
+    if [ "$code" = "1.8.0" ]; then
+      mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_TOPIC_1_8_0" -f "$SCRIPT_DIR/roi_combined.jpg" || log_error "MQTT ROI 1.8.0 publish failed"
+    else
+      mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_TOPIC_2_8_0" -f "$SCRIPT_DIR/roi_combined.jpg" || log_error "MQTT ROI 2.8.0 publish failed"
+    fi
+
+    # Публикация СТАРОЙ комбинированной картинки — только при DEBUG=true (как раньше)
     if [ "$DEBUG" -eq 1 ]; then
-      # Горизонтально: [code | value]; если высоты разные — IM сам подгонит подложкой
-      convert "$SCRIPT_DIR/code.jpg" "$SCRIPT_DIR/value.jpg" +append "$SCRIPT_DIR/roi_combined.jpg" || cp "$SCRIPT_DIR/code.jpg" "$SCRIPT_DIR/roi_combined.jpg"
       mosquitto_pub -r -h "$MQTT_HOST" -u "$MQTT_USER" -P "$MQTT_PASSWORD" -t "$IMG_TOPIC_COMBINED" -f "$SCRIPT_DIR/roi_combined.jpg" || log_error "MQTT ROI (combined) publish failed"
     fi
 
-    # OCR значения (оставляю whitelist без '4', как ты и хотел)
+    # OCR значения (оставляю whitelist без '4', как просил)
     value=$(tesseract "$SCRIPT_DIR/value.jpg" stdout -l ssd_int --tessdata-dir "$SCRIPT_DIR" --psm 7 -c tessedit_char_whitelist=012356789)
     [ $? -ne 0 ] && { log_error "Ошибка OCR VALUE"; sleep "$SLEEP_INTERVAL"; continue; }
     value=$(echo "$value" | xargs)
